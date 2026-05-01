@@ -37,6 +37,18 @@ add_executable(mesh_editor
     EditorHistory.cpp
     EditorSettings.cpp
     EditorUi.cpp
+    EditorUiInteraction.inc
+    EditorUiLayers.inc
+    EditorUiPanels.inc
+    EditorUiParameters.inc
+    EditorUiProject.inc
+    EditorUiRendering.inc
+    EditorUiSelection.inc
+    EditorUiShortcuts.inc
+    EditorUiTransforms.inc
+    EditorUiViewportMath.inc
+    EditorUiViewportPicking.inc
+    EditorUiViewportWindow.inc
     ImGuiLayer.cpp
     MeshGenerator.cpp
     PsdLoader.cpp

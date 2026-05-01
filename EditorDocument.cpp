@@ -1131,7 +1131,7 @@ static bool WriteBinaryParameterList(
                 }
 
                 for (std::size_t i = 0; i < corner.parameterIndices.size(); ++i) {
-                    const std::uint8_t cornerValue = corner.parameterValues[i] ? 1u : 0u;
+                    const float cornerValue = std::clamp(corner.parameterValues[i], 0.0f, 1.0f);
                     if (
                         !WriteBinaryValue(out, corner.parameterIndices[i]) ||
                         !WriteBinaryValue(out, cornerValue)
@@ -1180,6 +1180,37 @@ static bool WriteBinaryParameterList(
                     return false;
                 }
             }
+
+            if (state.setpoints.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+                return false;
+            }
+
+            const std::uint32_t setpointCount = static_cast<std::uint32_t>(state.setpoints.size());
+            if (!WriteBinaryValue(out, setpointCount)) {
+                return false;
+            }
+
+            for (const DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                if (
+                    setpoint.maskLayerIndices.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+                    !WriteBinaryValue(out, setpoint.value) ||
+                    !WriteBinaryMesh(out, setpoint.mesh) ||
+                    !WriteBinaryValue(out, setpoint.opacity) ||
+                    !WriteBinaryString(out, setpoint.renderOrderOverride)
+                ) {
+                    return false;
+                }
+
+                const std::uint32_t setpointMaskCount = static_cast<std::uint32_t>(setpoint.maskLayerIndices.size());
+                if (!WriteBinaryValue(out, setpointMaskCount)) {
+                    return false;
+                }
+                for (const int maskLayerIndex : setpoint.maskLayerIndices) {
+                    if (!WriteBinaryValue(out, maskLayerIndex)) {
+                        return false;
+                    }
+                }
+            }
         }
     }
 
@@ -1193,7 +1224,8 @@ static bool ReadBinaryParameterList(
     bool hasLayerVisualSetpoints,
     bool hasMaskSetpoints,
     bool hasParameterChannels,
-    bool hasParameterMeshCorners
+    bool hasParameterMeshCorners,
+    bool hasParameterSetpoints
 ) {
     parameters.clear();
 
@@ -1256,6 +1288,7 @@ static bool ReadBinaryParameterList(
             LayerMesh meshAt0;
             LayerMesh meshAt1;
             std::vector<DeformParameterMeshCorner> meshCorners;
+            std::vector<DeformParameterLayerSetpoint> setpoints;
             float opacityAt0 = 1.0f;
             float opacityAt1 = 1.0f;
             std::string renderOrderOverrideAt0;
@@ -1289,14 +1322,22 @@ static bool ReadBinaryParameterList(
                     corner.parameterIndices.resize(parameterIndexCount);
                     corner.parameterValues.resize(parameterIndexCount);
                     for (std::uint32_t parameterValueIndex = 0; parameterValueIndex < parameterIndexCount; ++parameterValueIndex) {
-                        std::uint8_t cornerValue = 0u;
-                        if (
-                            !ReadBinaryValue(in, corner.parameterIndices[parameterValueIndex]) ||
-                            !ReadBinaryValue(in, cornerValue)
-                        ) {
+                        if (!ReadBinaryValue(in, corner.parameterIndices[parameterValueIndex])) {
                             return false;
                         }
-                        corner.parameterValues[parameterValueIndex] = cornerValue ? 1u : 0u;
+                        if (hasParameterSetpoints) {
+                            float cornerValue = 0.0f;
+                            if (!ReadBinaryValue(in, cornerValue)) {
+                                return false;
+                            }
+                            corner.parameterValues[parameterValueIndex] = std::clamp(cornerValue, 0.0f, 1.0f);
+                        } else {
+                            std::uint8_t cornerValue = 0u;
+                            if (!ReadBinaryValue(in, cornerValue)) {
+                                return false;
+                            }
+                            corner.parameterValues[parameterValueIndex] = cornerValue ? 1.0f : 0.0f;
+                        }
                     }
 
                     if (!ReadBinaryMesh(in, corner.mesh)) {
@@ -1341,6 +1382,41 @@ static bool ReadBinaryParameterList(
                 }
             }
 
+            if (hasParameterSetpoints) {
+                std::uint32_t setpointCount = 0;
+                if (!ReadBinaryValue(in, setpointCount) || setpointCount > 100'000u) {
+                    return false;
+                }
+
+                setpoints.reserve(setpointCount);
+                for (std::uint32_t setpointIndex = 0; setpointIndex < setpointCount; ++setpointIndex) {
+                    DeformParameterLayerSetpoint setpoint;
+                    if (
+                        !ReadBinaryValue(in, setpoint.value) ||
+                        !ReadBinaryMesh(in, setpoint.mesh) ||
+                        !ReadBinaryValue(in, setpoint.opacity) ||
+                        !ReadBinaryString(in, setpoint.renderOrderOverride)
+                    ) {
+                        return false;
+                    }
+
+                    setpoint.value = std::clamp(setpoint.value, 0.0f, 1.0f);
+                    setpoint.opacity = std::clamp(setpoint.opacity, 0.0f, 1.0f);
+
+                    std::uint32_t setpointMaskCount = 0;
+                    if (!ReadBinaryValue(in, setpointMaskCount) || setpointMaskCount > 100'000u) {
+                        return false;
+                    }
+                    setpoint.maskLayerIndices.resize(setpointMaskCount);
+                    for (int& maskLayerIndex : setpoint.maskLayerIndices) {
+                        if (!ReadBinaryValue(in, maskLayerIndex)) {
+                            return false;
+                        }
+                    }
+                    setpoints.push_back(std::move(setpoint));
+                }
+            }
+
             const int targetIndex = ResolveSavedLayerIndex(editor, savedIndex, savedName);
             if (targetIndex < 0) {
                 continue;
@@ -1351,6 +1427,7 @@ static bool ReadBinaryParameterList(
             state.meshAt0 = std::move(meshAt0);
             state.meshAt1 = std::move(meshAt1);
             state.meshCorners = std::move(meshCorners);
+            state.setpoints = std::move(setpoints);
             if (hasLayerVisualSetpoints) {
                 state.opacityAt0 = std::clamp(opacityAt0, 0.0f, 1.0f);
                 state.opacityAt1 = std::clamp(opacityAt1, 0.0f, 1.0f);
@@ -1372,6 +1449,23 @@ static bool ReadBinaryParameterList(
                 state.renderOrderOverrideAt1 = layer.renderOrderOverride;
                 state.maskLayerIndicesAt0 = layer.maskLayerIndices;
                 state.maskLayerIndicesAt1 = layer.maskLayerIndices;
+            }
+            if (state.setpoints.empty()) {
+                DeformParameterLayerSetpoint zero;
+                zero.value = 0.0f;
+                zero.mesh = state.meshAt0;
+                zero.opacity = state.opacityAt0;
+                zero.renderOrderOverride = state.renderOrderOverrideAt0;
+                zero.maskLayerIndices = state.maskLayerIndicesAt0;
+                state.setpoints.push_back(std::move(zero));
+
+                DeformParameterLayerSetpoint one;
+                one.value = 1.0f;
+                one.mesh = state.meshAt1;
+                one.opacity = state.opacityAt1;
+                one.renderOrderOverride = state.renderOrderOverrideAt1;
+                one.maskLayerIndices = state.maskLayerIndicesAt1;
+                state.setpoints.push_back(std::move(one));
             }
             parameter.layers.push_back(std::move(state));
         }
@@ -1435,6 +1529,7 @@ static bool ReadBinaryLayerOperation(
     bool hasOperationSelectionMetadata,
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
+    bool hasParameterSetpoints,
     bool hasParameterSnapshots
 ) {
     int savedIndex = -1;
@@ -1485,8 +1580,8 @@ static bool ReadBinaryLayerOperation(
         }
         if (parsed.hasParameterSnapshot) {
             if (
-                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners) ||
-                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners)
+                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints) ||
+                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints)
             ) {
                 return false;
             }
@@ -1539,6 +1634,7 @@ static bool ReadBinaryHistory(
     bool hasOperationSelectionMetadata,
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
+    bool hasParameterSetpoints,
     bool hasParameterSnapshots
 ) {
     editor.history = EditHistory{};
@@ -1565,6 +1661,7 @@ static bool ReadBinaryHistory(
             hasOperationSelectionMetadata,
             hasParameterChannels,
             hasParameterMeshCorners,
+            hasParameterSetpoints,
             hasParameterSnapshots
         )) {
             return false;
@@ -1593,6 +1690,7 @@ static bool ReadBinaryHistory(
             hasOperationSelectionMetadata,
             hasParameterChannels,
             hasParameterMeshCorners,
+            hasParameterSetpoints,
             hasParameterSnapshots
         )) {
             return false;
@@ -1713,21 +1811,14 @@ static std::vector<int> CollectMeshParametersForLayerForSave(
 static bool CurrentValuesAreMeshCornerForSave(
     const std::vector<DeformParameter>& parameters,
     const std::vector<int>& parameterIndices,
-    std::vector<std::uint8_t>& cornerValues
+    std::vector<float>& cornerValues
 ) {
     cornerValues.clear();
     cornerValues.reserve(parameterIndices.size());
 
     for (const int parameterIndex : parameterIndices) {
         const float value = std::clamp(parameters[parameterIndex].value, 0.0f, 1.0f);
-        if (value <= 0.001f) {
-            cornerValues.push_back(0u);
-        } else if (value >= 0.999f) {
-            cornerValues.push_back(1u);
-        } else {
-            cornerValues.clear();
-            return false;
-        }
+        cornerValues.push_back(value);
     }
 
     return true;
@@ -1736,7 +1827,7 @@ static bool CurrentValuesAreMeshCornerForSave(
 static void StoreMeshCornerForSave(
     DeformParameterLayerState& state,
     const std::vector<int>& parameterIndices,
-    const std::vector<std::uint8_t>& cornerValues,
+    const std::vector<float>& cornerValues,
     const LayerMesh& mesh
 ) {
     for (DeformParameterMeshCorner& corner : state.meshCorners) {
@@ -1763,7 +1854,7 @@ static bool StoreCurrentMeshCornerForSave(
         return false;
     }
 
-    std::vector<std::uint8_t> cornerValues;
+    std::vector<float> cornerValues;
     if (!CurrentValuesAreMeshCornerForSave(parameters, parameterIndices, cornerValues)) {
         return false;
     }
@@ -1872,11 +1963,12 @@ static bool ReadBinaryParameters(
     bool hasLayerVisualSetpoints,
     bool hasMaskSetpoints,
     bool hasParameterChannels,
-    bool hasParameterMeshCorners
+    bool hasParameterMeshCorners,
+    bool hasParameterSetpoints
 ) {
     editor.parameters.clear();
     editor.selectedParameter = -1;
-    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners)) {
+    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints)) {
         return false;
     }
 
@@ -1989,7 +2081,8 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     const bool isVersion6 = magicString == std::string("MESHEDB6", 8);
     const bool isVersion7 = magicString == std::string("MESHEDB7", 8);
     const bool isVersion8 = magicString == std::string("MESHEDB8", 8);
-    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8)) {
+    const bool isVersion9 = magicString == std::string("MESHEDB9", 8);
+    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9)) {
         error = "Binary mesh file has an invalid header.";
         return false;
     }
@@ -2045,7 +2138,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         bool visible = true;
         float opacity = 1.0f;
         std::vector<int> masks;
-        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8) {
+        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) {
             if (!ReadBinaryValue(file, opacity)) {
                 error = "Binary mesh file has invalid layer opacity.";
                 return false;
@@ -2066,12 +2159,12 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         }
 
         std::string renderOrderOverride;
-        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8) && !ReadBinaryString(file, renderOrderOverride)) {
+        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) && !ReadBinaryString(file, renderOrderOverride)) {
             error = "Binary mesh file has invalid layer render order override.";
             return false;
         }
 
-        if (isVersion5 || isVersion6 || isVersion7 || isVersion8) {
+        if (isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) {
             std::uint8_t savedVisible = 1u;
             if (!ReadBinaryValue(file, savedVisible)) {
                 error = "Binary mesh file has invalid layer visibility.";
@@ -2095,7 +2188,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         loadedRecords.push_back(std::move(record));
     }
 
-    if ((isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8) && !loadedRecords.empty()) {
+    if ((isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) && !loadedRecords.empty()) {
         std::vector<EditorLayer> reordered;
         reordered.reserve(editor.document.layers.size());
         std::vector<std::uint8_t> used(editor.document.layers.size(), 0u);
@@ -2118,7 +2211,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
 
     int loadedCount = 0;
     for (std::size_t i = 0; i < loadedRecords.size(); ++i) {
-        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8)
+        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9)
             ? static_cast<int>(i)
             : loadedRecords[i].targetIndex;
         if (!(
@@ -2141,13 +2234,14 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     if (!ReadBinaryHistory(
         file,
         editor,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8,
-        isVersion6 || isVersion7 || isVersion8,
-        isVersion7 || isVersion8,
-        isVersion8,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion7 || isVersion8 || isVersion9,
+        isVersion8 || isVersion9,
+        isVersion9,
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9
     )) {
         error = "Binary mesh file has invalid history data.";
         return false;
@@ -2156,10 +2250,11 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     if (!ReadBinaryParameters(
         file,
         editor,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8,
-        isVersion7 || isVersion8,
-        isVersion8
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
+        isVersion7 || isVersion8 || isVersion9,
+        isVersion8 || isVersion9,
+        isVersion9
     )) {
         error = "Binary mesh file has invalid parameter data.";
         return false;
@@ -2272,7 +2367,7 @@ bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
         return false;
     }
 
-    file.write("MESHEDB8", 8);
+    file.write("MESHEDB9", 8);
 
     const std::uint32_t canvasWidth = static_cast<std::uint32_t>(std::max(0, editor.document.canvasWidth));
     const std::uint32_t canvasHeight = static_cast<std::uint32_t>(std::max(0, editor.document.canvasHeight));
@@ -2456,3 +2551,4 @@ void TranslateLayerMesh(EditorLayer& layer, float dx, float dy) {
     layer.top += static_cast<int>(std::round(dy));
     layer.bottom += static_cast<int>(std::round(dy));
 }
+

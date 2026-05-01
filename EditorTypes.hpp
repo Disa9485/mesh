@@ -60,8 +60,16 @@ struct LayerMesh {
 
 struct DeformParameterMeshCorner {
     std::vector<int> parameterIndices;
-    std::vector<std::uint8_t> parameterValues;
+    std::vector<float> parameterValues;
     LayerMesh mesh;
+};
+
+struct DeformParameterLayerSetpoint {
+    float value = 0.0f;
+    LayerMesh mesh;
+    float opacity = 1.0f;
+    std::string renderOrderOverride;
+    std::vector<int> maskLayerIndices;
 };
 
 struct DeformParameterLayerState {
@@ -69,6 +77,7 @@ struct DeformParameterLayerState {
     LayerMesh meshAt0;
     LayerMesh meshAt1;
     std::vector<DeformParameterMeshCorner> meshCorners;
+    std::vector<DeformParameterLayerSetpoint> setpoints;
     float opacityAt0 = 1.0f;
     float opacityAt1 = 1.0f;
     std::string renderOrderOverrideAt0;
@@ -137,6 +146,11 @@ enum class LayerTransformMode {
     Move,
     Scale,
     Rotate
+};
+
+enum class SelectionDragShape {
+    Rectangle,
+    Circle
 };
 
 struct EditorLayer {
@@ -232,6 +246,7 @@ struct EditorState {
     bool boxSelectionMoved = false;
     Vec2 boxSelectStartCanvasPos;
     Vec2 boxSelectCurrentCanvasPos;
+    SelectionDragShape selectionDragShape = SelectionDragShape::Rectangle;
     std::vector<CopiedMeshVertexPosition> meshPositionClipboard;
 
     std::vector<DeformParameter> parameters;
@@ -240,6 +255,7 @@ struct EditorState {
     EditHistory history;
     MeshGeneratorSettings meshSettings;
     bool showMeshGeneratorSettings = false;
+    bool showHistoryPanel = false;
     bool pendingGenerateMeshConfirmation = false;
     std::vector<int> pendingGenerateMeshLayers;
 };
