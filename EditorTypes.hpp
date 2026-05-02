@@ -67,6 +67,7 @@ struct DeformParameterMeshCorner {
 struct DeformParameterLayerSetpoint {
     float value = 0.0f;
     LayerMesh mesh;
+    int textureIndex = -1;
     float opacity = 1.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
@@ -76,6 +77,8 @@ struct DeformParameterLayerState {
     int layerIndex = -1;
     LayerMesh meshAt0;
     LayerMesh meshAt1;
+    int textureIndexAt0 = -1;
+    int textureIndexAt1 = -1;
     std::vector<DeformParameterMeshCorner> meshCorners;
     std::vector<DeformParameterLayerSetpoint> setpoints;
     float opacityAt0 = 1.0f;
@@ -86,13 +89,22 @@ struct DeformParameterLayerState {
     std::vector<int> maskLayerIndicesAt1;
 };
 
+enum class DeformParameterType {
+    Slider,
+    State
+};
+
 struct DeformParameter {
     std::string name;
+    DeformParameterType type = DeformParameterType::Slider;
     float value = 0.0f;
+    int selectedState = 0;
+    std::vector<std::string> stateNames;
     bool affectsMesh = true;
     bool affectsRenderOrder = true;
     bool affectsMasking = true;
     bool affectsOpacity = true;
+    bool affectsTexture = false;
     std::vector<DeformParameterLayerState> layers;
 };
 
@@ -108,6 +120,7 @@ struct MeshGeneratorSettings {
 };
 
 struct LayerHistoryState {
+    int textureIndex = -1;
     int left = 0;
     int top = 0;
     int right = 0;
@@ -119,11 +132,19 @@ struct LayerHistoryState {
     LayerMesh mesh;
 };
 
+struct LayerListHistoryState {
+    std::string name;
+    LayerHistoryState state;
+};
+
 struct LayerOperation {
     int layerIndex = -1;
     std::string description;
     LayerHistoryState before;
     LayerHistoryState after;
+    bool hasLayerListSnapshot = false;
+    std::vector<LayerListHistoryState> layersBefore;
+    std::vector<LayerListHistoryState> layersAfter;
     bool hasParameterSnapshot = false;
     std::vector<DeformParameter> parametersBefore;
     std::vector<DeformParameter> parametersAfter;
@@ -155,6 +176,7 @@ enum class SelectionDragShape {
 
 struct EditorLayer {
     std::string name;
+    int textureIndex = -1;
 
     int left = 0;
     int top = 0;
@@ -181,12 +203,33 @@ struct EditorLayer {
     LayerMesh mesh;
 };
 
+struct EditorTexture {
+    std::string name;
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+    int width = 0;
+    int height = 0;
+    GLuint texture = 0;
+    float previewU0 = 0.0f;
+    float previewV0 = 0.0f;
+    float previewU1 = 1.0f;
+    float previewV1 = 1.0f;
+    std::vector<std::uint8_t> alpha;
+    std::vector<std::uint8_t> baseRgba;
+    std::vector<std::uint8_t> renderedRgba;
+};
+
 struct EditorDocument {
     std::string path;
+    std::string projectPath;
+    std::string psdPath;
 
     int canvasWidth = 0;
     int canvasHeight = 0;
 
+    std::vector<EditorTexture> textures;
     std::vector<EditorLayer> layers;
 };
 
@@ -194,6 +237,8 @@ struct EditorState {
     EditorDocument document;
 
     std::string pendingPath;
+    std::string pendingProjectPath;
+    std::string pendingPsdPath;
     std::string statusText = "No PSD loaded.";
     std::string errorText;
 
@@ -251,11 +296,35 @@ struct EditorState {
 
     std::vector<DeformParameter> parameters;
     int selectedParameter = -1;
+    int selectedParameterSetpointParameter = -1;
+    float selectedParameterSetpointValue = -1.0f;
+    bool draggingParameterSetpoint = false;
+    bool pendingParameterSetpointDrag = false;
+    float parameterSetpointDragStartMouseX = 0.0f;
+    float parameterSetpointDragStartValue = 0.0f;
+    double parameterSetpointDragStartTime = 0.0;
+    bool parameterEditSnapActive = false;
+    float parameterEditSnapTarget = 0.0f;
+    std::vector<DeformParameter> parameterSetpointDragBefore;
+    int parameterSetpointDragSelectedBefore = -1;
+    bool showAddParameterTypePopup = false;
+    bool showAddParameterStatePopup = false;
+    int addParameterStateTarget = -1;
+    char addParameterStateName[128] = {};
 
     EditHistory history;
     MeshGeneratorSettings meshSettings;
     bool showMeshGeneratorSettings = false;
     bool showHistoryPanel = false;
+    bool showLoadProjectDialog = false;
+    bool showSaveProjectAsDialog = false;
+    bool showAttachPsdDialog = false;
+    bool duplicateLayerCopyParameters = false;
+    bool showAlignMeshesPopup = false;
+    int alignMeshesTargetLayer = -1;
+    int alignMeshesSourceLayer = -1;
+    int alignMeshesParameter = -1;
+    float alignMeshesStartSetpoint = 0.0f;
     bool pendingGenerateMeshConfirmation = false;
     std::vector<int> pendingGenerateMeshLayers;
 };

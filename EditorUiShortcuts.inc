@@ -141,6 +141,14 @@ static void HandleEditorShortcuts(EditorState& editor) {
     }
 
     if (
+        editor.selectedParameterSetpointParameter >= 0 &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete, false)
+    ) {
+        DeleteSelectedParameterSetpoint(editor);
+        return;
+    }
+
+    if (
         editor.mode == EditorMode::Layer &&
         io.KeyCtrl &&
         ImGui::IsKeyPressed(ImGuiKey_C, false)
@@ -225,7 +233,12 @@ void DropCallback(GLFWwindow* window, int count, const char** paths) {
     editor->pendingPath = paths[0];
 
     std::string error;
-    if (!LoadPsdIntoEditor(editor->pendingPath, *editor, window, error)) {
+    const std::filesystem::path dropped(editor->pendingPath);
+    const bool loadAsPsd = dropped.extension() == ".psd" || dropped.extension() == ".PSD";
+    const bool loaded = loadAsPsd
+        ? LoadPsdIntoEditor(editor->pendingPath, *editor, window, error)
+        : LoadProjectForEditor(editor->pendingPath, *editor, window, error);
+    if (!loaded) {
         editor->errorText = error;
         editor->statusText = "Load failed.";
     }

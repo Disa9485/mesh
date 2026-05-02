@@ -17,6 +17,7 @@ static void HandleMeshEditing(
 
         if (pickedVertex >= 0) {
             const std::uint32_t vertex = static_cast<std::uint32_t>(pickedVertex);
+            ClearParameterSetpointSelection(editor);
 
             if (io.KeyShift) {
                 ToggleIndex(editor.selectedVertices, vertex);
@@ -35,6 +36,7 @@ static void HandleMeshEditing(
         const int pickedEdge = PickEdgeAtCanvasPoint(layer, canvasPoint, zoom);
         if (pickedEdge >= 0) {
             const std::uint32_t edge = static_cast<std::uint32_t>(pickedEdge);
+            ClearParameterSetpointSelection(editor);
 
             if (io.KeyShift) {
                 ToggleIndex(editor.selectedEdges, edge);
@@ -74,6 +76,8 @@ static void HandleMeshEditing(
 
         if (pickedVertex >= 0) {
             const LayerHistoryState before = CaptureLayerHistoryState(layer);
+            const std::vector<DeformParameter> parametersBefore = editor.parameters;
+            const std::vector<int> oldToNewVertex = MakeIdentityVertexRemap(layer.mesh.vertices.size());
             if (HasSelectedVertex(editor)) {
                 AddMeshEdgeIfMissing(
                     layer.mesh,
@@ -85,7 +89,9 @@ static void HandleMeshEditing(
             ClearMeshSelection(editor);
             editor.selectedVertices.push_back(static_cast<std::uint32_t>(pickedVertex));
             UpdateLayerBoundsFromMesh(layer);
-            PushMeshEditOperation(editor, before, "Add mesh edge");
+            RebuildMeshTrianglesFromEdges(layer.mesh);
+            ReconcileParameterMeshesAfterMeshEdit(editor, editor.selectedLayer, oldToNewVertex);
+            PushMeshEditOperationWithParameters(editor, before, parametersBefore, "Add mesh edge");
             return;
         }
 
@@ -121,7 +127,18 @@ static void HandleMeshEditing(
 
     if (editor.draggingMeshSelection && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         if (editor.meshSelectionMoved) {
-            PushMeshEditOperation(editor, editor.meshEditStartLayerState, "Move mesh vertices");
+            const std::vector<DeformParameter> parametersBefore = editor.parameters;
+            ReconcileParameterMeshesAfterMeshVertexMove(
+                editor,
+                editor.selectedLayer,
+                editor.meshEditStartLayerState.mesh
+            );
+            PushMeshEditOperationWithParameters(
+                editor,
+                editor.meshEditStartLayerState,
+                parametersBefore,
+                "Move mesh vertices"
+            );
         }
 
         editor.draggingMeshSelection = false;
@@ -201,12 +218,16 @@ static bool HandleDeformVertexEditing(
                 if (GetSelectedLayerBounds(editor, sx0, sy0, sx1, sy1)) {
                     PadBounds(sx0, sy0, sx1, sy1, zoom);
                     const Vec2 layerCenter{(sx0 + sx1) * 0.5f, (sy0 + sy1) * 0.5f};
-                    const float centerRadius = std::max(18.0f / std::max(zoom, 0.0001f), 8.0f);
+                    const float centerRadius = ScreenPixelsToCanvas(10.0f, zoom);
                     const Vec2 delta = canvasPoint - layerCenter;
                     if (Dot(delta, delta) <= centerRadius * centerRadius) {
                         return false;
                     }
                 }
+            }
+
+            if (ActiveParameterNeedsSetpointSnapBeforeEdit(editor)) {
+                return true;
             }
 
             BeginDeformVertexTransform(
@@ -235,6 +256,7 @@ static bool HandleDeformVertexEditing(
 
         SelectedVertexRef pickedVertex;
         if (PickVertexInSelectedLayers(editor, canvasPoint, zoom, pickedVertex)) {
+            ClearParameterSetpointSelection(editor);
 
             if (io.KeyShift) {
                 ToggleVertexRef(editor.selectedDeformVertices, pickedVertex);
@@ -245,6 +267,10 @@ static bool HandleDeformVertexEditing(
 
             editor.selectedEdges.clear();
             if (ContainsVertexRef(editor.selectedDeformVertices, pickedVertex)) {
+                if (ActiveParameterNeedsSetpointSnapBeforeEdit(editor)) {
+                    return true;
+                }
+
                 BeginDeformVertexTransform(
                     editor,
                     editor.document.layers[pickedVertex.layerIndex],
@@ -396,4 +422,3 @@ static bool HandleDeformVertexEditing(
 
     return false;
 }
-

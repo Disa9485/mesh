@@ -31,5 +31,21 @@ void PushParameterOperation(
     int selectedParameterAfter,
     const std::string& description
 );
+void PushLayerListOperation(
+    EditorState& editor,
+    std::vector<LayerListHistoryState> layersBefore,
+    std::vector<LayerListHistoryState> layersAfter,
+    const std::string& description
+);
+void PushLayerListOperationWithParameters(
+    EditorState& editor,
+    std::vector<LayerListHistoryState> layersBefore,
+    std::vector<LayerListHistoryState> layersAfter,
+    const std::vector<DeformParameter>& parametersBefore,
+    int selectedParameterBefore,
+    const std::vector<DeformParameter>& parametersAfter,
+    int selectedParameterAfter,
+    const std::string& description
+);
 bool UndoLastOperation(EditorState& editor);
 bool RedoLastOperation(EditorState& editor);

@@ -9,6 +9,7 @@
 
 LayerHistoryState CaptureLayerHistoryState(const EditorLayer& layer) {
     LayerHistoryState state;
+    state.textureIndex = layer.textureIndex;
     state.left = layer.left;
     state.top = layer.top;
     state.right = layer.right;
@@ -22,6 +23,7 @@ LayerHistoryState CaptureLayerHistoryState(const EditorLayer& layer) {
 }
 
 void ApplyLayerHistoryState(EditorLayer& layer, const LayerHistoryState& state) {
+    layer.textureIndex = state.textureIndex;
     layer.left = state.left;
     layer.top = state.top;
     layer.right = state.right;
@@ -59,6 +61,51 @@ static bool AreLayerMeshesEqual(const LayerMesh& a, const LayerMesh& b) {
     return true;
 }
 
+static bool AreParameterMeshCornersEqual(
+    const std::vector<DeformParameterMeshCorner>& a,
+    const std::vector<DeformParameterMeshCorner>& b
+) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (
+            a[i].parameterIndices != b[i].parameterIndices ||
+            a[i].parameterValues != b[i].parameterValues ||
+            !AreLayerMeshesEqual(a[i].mesh, b[i].mesh)
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool AreParameterLayerSetpointsEqual(
+    const std::vector<DeformParameterLayerSetpoint>& a,
+    const std::vector<DeformParameterLayerSetpoint>& b
+) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (
+            a[i].value != b[i].value ||
+            !AreLayerMeshesEqual(a[i].mesh, b[i].mesh) ||
+            a[i].textureIndex != b[i].textureIndex ||
+            a[i].opacity != b[i].opacity ||
+            a[i].renderOrderOverride != b[i].renderOrderOverride ||
+            a[i].maskLayerIndices != b[i].maskLayerIndices
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool AreParameterLayerStatesEqual(
     const DeformParameterLayerState& a,
     const DeformParameterLayerState& b
@@ -67,12 +114,16 @@ static bool AreParameterLayerStatesEqual(
         a.layerIndex == b.layerIndex &&
         AreLayerMeshesEqual(a.meshAt0, b.meshAt0) &&
         AreLayerMeshesEqual(a.meshAt1, b.meshAt1) &&
+        a.textureIndexAt0 == b.textureIndexAt0 &&
+        a.textureIndexAt1 == b.textureIndexAt1 &&
         a.opacityAt0 == b.opacityAt0 &&
         a.opacityAt1 == b.opacityAt1 &&
         a.renderOrderOverrideAt0 == b.renderOrderOverrideAt0 &&
         a.renderOrderOverrideAt1 == b.renderOrderOverrideAt1 &&
         a.maskLayerIndicesAt0 == b.maskLayerIndicesAt0 &&
-        a.maskLayerIndicesAt1 == b.maskLayerIndicesAt1;
+        a.maskLayerIndicesAt1 == b.maskLayerIndicesAt1 &&
+        AreParameterMeshCornersEqual(a.meshCorners, b.meshCorners) &&
+        AreParameterLayerSetpointsEqual(a.setpoints, b.setpoints);
 }
 
 static bool AreParameterListsEqual(
@@ -86,11 +137,15 @@ static bool AreParameterListsEqual(
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (
             a[i].name != b[i].name ||
+            a[i].type != b[i].type ||
             a[i].value != b[i].value ||
+            a[i].selectedState != b[i].selectedState ||
+            a[i].stateNames != b[i].stateNames ||
             a[i].affectsMesh != b[i].affectsMesh ||
             a[i].affectsRenderOrder != b[i].affectsRenderOrder ||
             a[i].affectsMasking != b[i].affectsMasking ||
             a[i].affectsOpacity != b[i].affectsOpacity ||
+            a[i].affectsTexture != b[i].affectsTexture ||
             a[i].layers.size() != b[i].layers.size()
         ) {
             return false;
@@ -116,6 +171,7 @@ static bool AreLayerHistoryStatesEqual(
 ) {
     return
         a.left == b.left &&
+        a.textureIndex == b.textureIndex &&
         a.top == b.top &&
         a.right == b.right &&
         a.bottom == b.bottom &&
@@ -124,6 +180,26 @@ static bool AreLayerHistoryStatesEqual(
         a.renderOrderOverride == b.renderOrderOverride &&
         a.maskLayerIndices == b.maskLayerIndices &&
         AreLayerMeshesEqual(a.mesh, b.mesh);
+}
+
+static bool AreLayerListsEqual(
+    const std::vector<LayerListHistoryState>& a,
+    const std::vector<LayerListHistoryState>& b
+) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (
+            a[i].name != b[i].name ||
+            !AreLayerHistoryStatesEqual(a[i].state, b[i].state)
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool IsValidLayerIndex(const EditorState& editor, int layerIndex) {
@@ -209,6 +285,65 @@ void PushParameterOperation(
     editor.history.redoStack.clear();
 }
 
+void PushLayerListOperation(
+    EditorState& editor,
+    std::vector<LayerListHistoryState> layersBefore,
+    std::vector<LayerListHistoryState> layersAfter,
+    const std::string& description
+) {
+    if (AreLayerListsEqual(layersBefore, layersAfter)) {
+        return;
+    }
+
+    LayerOperation operation;
+    operation.layerIndex = -1;
+    operation.description = description;
+    operation.hasLayerListSnapshot = true;
+    operation.layersBefore = std::move(layersBefore);
+    operation.layersAfter = std::move(layersAfter);
+
+    editor.history.undoStack.push_back(std::move(operation));
+    editor.history.redoStack.clear();
+}
+
+void PushLayerListOperationWithParameters(
+    EditorState& editor,
+    std::vector<LayerListHistoryState> layersBefore,
+    std::vector<LayerListHistoryState> layersAfter,
+    const std::vector<DeformParameter>& parametersBefore,
+    int selectedParameterBefore,
+    const std::vector<DeformParameter>& parametersAfter,
+    int selectedParameterAfter,
+    const std::string& description
+) {
+    const bool layersChanged = !AreLayerListsEqual(layersBefore, layersAfter);
+    const bool parametersChanged =
+        !AreParameterListsEqual(parametersBefore, parametersAfter) ||
+        selectedParameterBefore != selectedParameterAfter;
+    if (!layersChanged && !parametersChanged) {
+        return;
+    }
+
+    LayerOperation operation;
+    operation.layerIndex = -1;
+    operation.description = description;
+    if (layersChanged) {
+        operation.hasLayerListSnapshot = true;
+        operation.layersBefore = std::move(layersBefore);
+        operation.layersAfter = std::move(layersAfter);
+    }
+    if (parametersChanged) {
+        operation.hasParameterSnapshot = true;
+        operation.parametersBefore = parametersBefore;
+        operation.parametersAfter = parametersAfter;
+        operation.selectedParameterBefore = selectedParameterBefore;
+        operation.selectedParameterAfter = selectedParameterAfter;
+    }
+
+    editor.history.undoStack.push_back(std::move(operation));
+    editor.history.redoStack.clear();
+}
+
 static void ClampSelectedParameter(EditorState& editor) {
     if (editor.selectedParameter >= static_cast<int>(editor.parameters.size())) {
         editor.selectedParameter = editor.parameters.empty() ? -1 : static_cast<int>(editor.parameters.size()) - 1;
@@ -237,6 +372,7 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         const DeformParameterLayerState* opacityBaseState = nullptr;
         const DeformParameterLayerState* renderOrderBaseState = nullptr;
         const DeformParameterLayerState* maskingBaseState = nullptr;
+        const DeformParameterLayerState* textureBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerStateForHistory(parameter, layerIndex);
             if (!state) {
@@ -255,14 +391,18 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             if (parameter.affectsMasking && !maskingBaseState) {
                 maskingBaseState = state;
             }
+            if (parameter.affectsTexture && !textureBaseState) {
+                textureBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState) {
             continue;
         }
 
         EditorLayer& layer = editor.document.layers[layerIndex];
         LayerMesh resultMesh = meshBaseState ? meshBaseState->meshAt0 : layer.mesh;
+        int resultTextureIndex = textureBaseState ? textureBaseState->textureIndexAt0 : layer.textureIndex;
         float resultOpacity = opacityBaseState ? opacityBaseState->opacityAt0 : layer.opacity;
         std::string resultRenderOrderOverride = renderOrderBaseState
             ? renderOrderBaseState->renderOrderOverrideAt0
@@ -294,6 +434,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             if (parameter.affectsOpacity) {
                 resultOpacity += (state->opacityAt1 - state->opacityAt0) * value;
             }
+            if (parameter.affectsTexture) {
+                resultTextureIndex = value >= 0.999f ? state->textureIndexAt1 : state->textureIndexAt0;
+            }
             if (parameter.affectsRenderOrder && value <= 0.001f) {
                 resultRenderOrderOverride = state->renderOrderOverrideAt0;
             } else if (parameter.affectsRenderOrder && value >= 0.999f) {
@@ -307,6 +450,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         }
 
         layer.mesh = std::move(resultMesh);
+        if (resultTextureIndex != layer.textureIndex) {
+            ApplyTextureToLayer(editor.document, layer, resultTextureIndex);
+        }
         layer.opacity = std::clamp(resultOpacity, 0.0f, 1.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
@@ -355,6 +501,45 @@ static void RestoreParameterSnapshot(
     ApplyParameterSnapshotsToLayers(editor);
 }
 
+static void RestoreLayerListSnapshot(EditorState& editor, const std::vector<LayerListHistoryState>& layers) {
+    editor.document.layers.clear();
+    editor.document.layers.reserve(layers.size());
+    for (const LayerListHistoryState& snapshot : layers) {
+        EditorLayer layer;
+        layer.name = snapshot.name;
+        ApplyLayerHistoryState(layer, snapshot.state);
+        editor.document.layers.push_back(std::move(layer));
+    }
+
+    for (EditorLayer& layer : editor.document.layers) {
+        ApplyTextureToLayer(editor.document, layer, layer.textureIndex);
+    }
+
+    if (editor.document.layers.empty()) {
+        editor.selectedLayer = -1;
+        editor.selectedLayers.clear();
+    } else {
+        editor.selectedLayer = std::clamp(editor.selectedLayer, 0, static_cast<int>(editor.document.layers.size()) - 1);
+        editor.selectedLayers.erase(
+            std::remove_if(
+                editor.selectedLayers.begin(),
+                editor.selectedLayers.end(),
+                [&](int layerIndex) {
+                    return !IsValidLayerIndex(editor, layerIndex);
+                }
+            ),
+            editor.selectedLayers.end()
+        );
+        if (editor.selectedLayers.empty()) {
+            editor.selectedLayers.push_back(editor.selectedLayer);
+        }
+    }
+
+    editor.selectedVertices.clear();
+    editor.selectedEdges.clear();
+    editor.selectedDeformVertices.clear();
+}
+
 bool UndoLastOperation(EditorState& editor) {
     if (editor.history.undoStack.empty()) {
         return false;
@@ -363,12 +548,20 @@ bool UndoLastOperation(EditorState& editor) {
     LayerOperation operation = std::move(editor.history.undoStack.back());
     editor.history.undoStack.pop_back();
 
-    if (!IsValidLayerIndex(editor, operation.layerIndex) && !operation.hasParameterSnapshot) {
+    if (!IsValidLayerIndex(editor, operation.layerIndex) && !operation.hasParameterSnapshot && !operation.hasLayerListSnapshot) {
         return false;
     }
 
+    if (operation.hasLayerListSnapshot) {
+        RestoreLayerListSnapshot(editor, operation.layersBefore);
+    }
     if (IsValidLayerIndex(editor, operation.layerIndex)) {
         ApplyLayerHistoryState(editor.document.layers[operation.layerIndex], operation.before);
+        ApplyTextureToLayer(
+            editor.document,
+            editor.document.layers[operation.layerIndex],
+            editor.document.layers[operation.layerIndex].textureIndex
+        );
         RebuildLayerRenderedTexture(editor, operation.layerIndex);
         editor.selectedLayer = operation.layerIndex;
     }
@@ -393,12 +586,20 @@ bool RedoLastOperation(EditorState& editor) {
     LayerOperation operation = std::move(editor.history.redoStack.back());
     editor.history.redoStack.pop_back();
 
-    if (!IsValidLayerIndex(editor, operation.layerIndex) && !operation.hasParameterSnapshot) {
+    if (!IsValidLayerIndex(editor, operation.layerIndex) && !operation.hasParameterSnapshot && !operation.hasLayerListSnapshot) {
         return false;
     }
 
+    if (operation.hasLayerListSnapshot) {
+        RestoreLayerListSnapshot(editor, operation.layersAfter);
+    }
     if (IsValidLayerIndex(editor, operation.layerIndex)) {
         ApplyLayerHistoryState(editor.document.layers[operation.layerIndex], operation.after);
+        ApplyTextureToLayer(
+            editor.document,
+            editor.document.layers[operation.layerIndex],
+            editor.document.layers[operation.layerIndex].textureIndex
+        );
         RebuildLayerRenderedTexture(editor, operation.layerIndex);
         editor.selectedLayer = operation.layerIndex;
     }

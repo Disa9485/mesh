@@ -28,6 +28,112 @@ static bool MeshTopologyMatches(const LayerMesh& a, const LayerMesh& b) {
     return a.vertices.size() == b.vertices.size();
 }
 
+static void ReconcileStoredMeshAfterMeshEdit(
+    LayerMesh& storedMesh,
+    const LayerMesh& editedMesh,
+    const std::vector<int>& oldToNewVertex
+) {
+    LayerMesh reconciled;
+    reconciled.vertices = editedMesh.vertices;
+    reconciled.indices = editedMesh.indices;
+    reconciled.edges = editedMesh.edges;
+
+    for (std::size_t oldIndex = 0; oldIndex < oldToNewVertex.size(); ++oldIndex) {
+        const int newIndex = oldToNewVertex[oldIndex];
+        if (
+            newIndex < 0 ||
+            newIndex >= static_cast<int>(reconciled.vertices.size()) ||
+            oldIndex >= storedMesh.vertices.size()
+        ) {
+            continue;
+        }
+
+        reconciled.vertices[static_cast<std::size_t>(newIndex)].position =
+            storedMesh.vertices[oldIndex].position;
+    }
+
+    storedMesh = std::move(reconciled);
+}
+
+static void ReconcileParameterMeshesAfterMeshEdit(
+    EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& oldToNewVertex
+) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
+        return;
+    }
+
+    const LayerMesh& editedMesh = editor.document.layers[layerIndex].mesh;
+    for (DeformParameter& parameter : editor.parameters) {
+        DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
+        if (!state) {
+            continue;
+        }
+
+        ReconcileStoredMeshAfterMeshEdit(state->meshAt0, editedMesh, oldToNewVertex);
+        ReconcileStoredMeshAfterMeshEdit(state->meshAt1, editedMesh, oldToNewVertex);
+        for (DeformParameterLayerSetpoint& setpoint : state->setpoints) {
+            ReconcileStoredMeshAfterMeshEdit(setpoint.mesh, editedMesh, oldToNewVertex);
+        }
+        for (DeformParameterMeshCorner& corner : state->meshCorners) {
+            ReconcileStoredMeshAfterMeshEdit(corner.mesh, editedMesh, oldToNewVertex);
+        }
+    }
+}
+
+static void ReconcileStoredMeshAfterMeshVertexMove(
+    LayerMesh& storedMesh,
+    const LayerMesh& beforeMesh,
+    const LayerMesh& editedMesh
+) {
+    if (!MeshTopologyMatches(storedMesh, beforeMesh) || !MeshTopologyMatches(storedMesh, editedMesh)) {
+        std::vector<int> identity(beforeMesh.vertices.size(), -1);
+        for (std::size_t i = 0; i < identity.size(); ++i) {
+            identity[i] = static_cast<int>(i);
+        }
+        ReconcileStoredMeshAfterMeshEdit(storedMesh, editedMesh, identity);
+        return;
+    }
+
+    storedMesh.indices = editedMesh.indices;
+    storedMesh.edges = editedMesh.edges;
+    for (std::size_t i = 0; i < storedMesh.vertices.size(); ++i) {
+        storedMesh.vertices[i].uv = editedMesh.vertices[i].uv;
+        storedMesh.vertices[i].position.x +=
+            editedMesh.vertices[i].position.x - beforeMesh.vertices[i].position.x;
+        storedMesh.vertices[i].position.y +=
+            editedMesh.vertices[i].position.y - beforeMesh.vertices[i].position.y;
+    }
+}
+
+static void ReconcileParameterMeshesAfterMeshVertexMove(
+    EditorState& editor,
+    int layerIndex,
+    const LayerMesh& beforeMesh
+) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
+        return;
+    }
+
+    const LayerMesh& editedMesh = editor.document.layers[layerIndex].mesh;
+    for (DeformParameter& parameter : editor.parameters) {
+        DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
+        if (!state) {
+            continue;
+        }
+
+        ReconcileStoredMeshAfterMeshVertexMove(state->meshAt0, beforeMesh, editedMesh);
+        ReconcileStoredMeshAfterMeshVertexMove(state->meshAt1, beforeMesh, editedMesh);
+        for (DeformParameterLayerSetpoint& setpoint : state->setpoints) {
+            ReconcileStoredMeshAfterMeshVertexMove(setpoint.mesh, beforeMesh, editedMesh);
+        }
+        for (DeformParameterMeshCorner& corner : state->meshCorners) {
+            ReconcileStoredMeshAfterMeshVertexMove(corner.mesh, beforeMesh, editedMesh);
+        }
+    }
+}
+
 static bool CanAccumulateParameterState(
     const LayerMesh& baseMesh,
     const DeformParameterLayerState& state
@@ -49,11 +155,13 @@ static DeformParameterLayerSetpoint MakeSetpointFromState(
     setpoint.value = std::clamp(value, 0.0f, 1.0f);
     if (setpoint.value <= 0.001f) {
         setpoint.mesh = state.meshAt0;
+        setpoint.textureIndex = state.textureIndexAt0;
         setpoint.opacity = state.opacityAt0;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt0;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt0;
     } else {
         setpoint.mesh = state.meshAt1;
+        setpoint.textureIndex = state.textureIndexAt1;
         setpoint.opacity = state.opacityAt1;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt1;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt1;
@@ -94,8 +202,106 @@ static void EnsureParameterLayerSetpoints(DeformParameterLayerState& state) {
     SortParameterSetpoints(state);
 }
 
+static bool IsStateParameter(const DeformParameter& parameter) {
+    return parameter.type == DeformParameterType::State;
+}
+
+static void EnsureStateParameterDefaults(DeformParameter& parameter) {
+    if (!IsStateParameter(parameter)) {
+        return;
+    }
+
+    if (parameter.stateNames.empty()) {
+        parameter.stateNames.push_back("Default");
+    }
+    parameter.selectedState = std::clamp(
+        parameter.selectedState,
+        0,
+        static_cast<int>(parameter.stateNames.size()) - 1
+    );
+    parameter.value = static_cast<float>(parameter.selectedState);
+}
+
+static DeformParameterLayerSetpoint MakeStateSetpointFromLayer(
+    const EditorLayer& layer,
+    int stateIndex
+) {
+    DeformParameterLayerSetpoint setpoint;
+    setpoint.value = static_cast<float>(stateIndex);
+    setpoint.mesh = layer.mesh;
+    setpoint.textureIndex = layer.textureIndex;
+    setpoint.opacity = layer.opacity;
+    setpoint.renderOrderOverride = layer.renderOrderOverride;
+    setpoint.maskLayerIndices = layer.maskLayerIndices;
+    return setpoint;
+}
+
+static void EnsureStateParameterLayerSetpoints(
+    const DeformParameter& parameter,
+    DeformParameterLayerState& state
+) {
+    if (!IsStateParameter(parameter)) {
+        EnsureParameterLayerSetpoints(state);
+        return;
+    }
+
+    const int stateCount = std::max(1, static_cast<int>(parameter.stateNames.size()));
+    if (state.setpoints.empty()) {
+        DeformParameterLayerSetpoint base = MakeSetpointFromState(state, 0.0f);
+        base.value = 0.0f;
+        state.setpoints.push_back(std::move(base));
+    }
+
+    for (int stateIndex = 0; stateIndex < stateCount; ++stateIndex) {
+        const float stateValue = static_cast<float>(stateIndex);
+        const bool exists = std::any_of(
+            state.setpoints.begin(),
+            state.setpoints.end(),
+            [&](const DeformParameterLayerSetpoint& setpoint) {
+                return NearlyEqualSetpointValue(setpoint.value, stateValue);
+            }
+        );
+        if (!exists) {
+            DeformParameterLayerSetpoint copy = state.setpoints.front();
+            copy.value = stateValue;
+            state.setpoints.push_back(std::move(copy));
+        }
+    }
+
+    state.setpoints.erase(
+        std::remove_if(
+            state.setpoints.begin(),
+            state.setpoints.end(),
+            [&](const DeformParameterLayerSetpoint& setpoint) {
+                return setpoint.value < -0.001f || setpoint.value > static_cast<float>(stateCount - 1) + 0.001f;
+            }
+        ),
+        state.setpoints.end()
+    );
+    SortParameterSetpoints(state);
+}
+
+static float ParameterEvaluationValue(const DeformParameter& parameter) {
+    return IsStateParameter(parameter)
+        ? static_cast<float>(std::clamp(
+            parameter.selectedState,
+            0,
+            std::max(0, static_cast<int>(parameter.stateNames.size()) - 1)
+        ))
+        : std::clamp(parameter.value, 0.0f, 1.0f);
+}
+
 static std::vector<float> CollectParameterSetpointValues(const DeformParameter& parameter) {
     std::vector<float> values;
+    if (IsStateParameter(parameter)) {
+        const int stateCount = std::max(1, static_cast<int>(parameter.stateNames.size()));
+        values.reserve(static_cast<std::size_t>(stateCount));
+        for (int i = 0; i < stateCount; ++i) {
+            values.push_back(static_cast<float>(i));
+        }
+        return values;
+    }
+
     values.push_back(0.0f);
     values.push_back(1.0f);
 
@@ -115,6 +321,449 @@ static std::vector<float> CollectParameterSetpointValues(const DeformParameter& 
     return values;
 }
 
+static bool IsEndpointSetpointValue(float value) {
+    return NearlyEqualSetpointValue(value, 0.0f) || NearlyEqualSetpointValue(value, 1.0f);
+}
+
+static bool FindNearbyParameterSetpointValue(
+    const DeformParameter& parameter,
+    float value,
+    float radius,
+    float& nearestValue
+) {
+    bool found = false;
+    float bestDistance = radius;
+    for (const float setpoint : CollectParameterSetpointValues(parameter)) {
+        const float distance = std::abs(setpoint - value);
+        if (distance <= bestDistance) {
+            bestDistance = distance;
+            nearestValue = setpoint;
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+static bool ParameterHasSetpointValue(const DeformParameter& parameter, float value) {
+    const std::vector<float> setpoints = CollectParameterSetpointValues(parameter);
+    return std::any_of(setpoints.begin(), setpoints.end(), [&](float setpoint) {
+        return NearlyEqualSetpointValue(setpoint, value);
+    });
+}
+
+static void ApplyAllDeformParameters(EditorState& editor);
+
+static bool ActiveParameterNeedsSetpointSnapBeforeEdit(EditorState& editor) {
+    if (
+        editor.selectedParameter < 0 ||
+        editor.selectedParameter >= static_cast<int>(editor.parameters.size())
+    ) {
+        return false;
+    }
+
+    DeformParameter& parameter = editor.parameters[editor.selectedParameter];
+    if (IsStateParameter(parameter)) {
+        return false;
+    }
+    constexpr float snapRadius = 0.05f;
+    float nearestValue = 0.0f;
+    if (!FindNearbyParameterSetpointValue(parameter, parameter.value, snapRadius, nearestValue)) {
+        return false;
+    }
+
+    if (NearlyEqualSetpointValue(parameter.value, nearestValue)) {
+        parameter.value = nearestValue;
+        return false;
+    }
+
+    editor.parameterEditSnapActive = true;
+    editor.parameterEditSnapTarget = nearestValue;
+    editor.statusText = "Snapping to nearby parameter setpoint before editing.";
+    return true;
+}
+
+static bool ContinueParameterEditSetpointSnap(EditorState& editor) {
+    if (
+        !editor.parameterEditSnapActive ||
+        editor.selectedParameter < 0 ||
+        editor.selectedParameter >= static_cast<int>(editor.parameters.size())
+    ) {
+        editor.parameterEditSnapActive = false;
+        return false;
+    }
+
+    DeformParameter& parameter = editor.parameters[editor.selectedParameter];
+    const float target = editor.parameterEditSnapTarget;
+    parameter.value += (target - parameter.value) * 0.28f;
+    if (std::abs(parameter.value - target) <= 0.001f) {
+        parameter.value = target;
+        editor.parameterEditSnapActive = false;
+    }
+
+    ApplyAllDeformParameters(editor);
+    return true;
+}
+
+static float ResolveDraggedSetpointValue(
+    const DeformParameter& parameter,
+    float oldValue,
+    float requestedValue
+) {
+    constexpr float minSpacing = 0.05f;
+    float resolved = std::clamp(requestedValue, 0.001f, 0.999f);
+    const std::vector<float> setpoints = CollectParameterSetpointValues(parameter);
+
+    for (int pass = 0; pass < 4; ++pass) {
+        bool adjusted = false;
+        for (const float setpoint : setpoints) {
+            if (NearlyEqualSetpointValue(setpoint, oldValue)) {
+                continue;
+            }
+
+            if (std::abs(resolved - setpoint) < minSpacing) {
+                resolved = requestedValue < setpoint
+                    ? setpoint - minSpacing
+                    : setpoint + minSpacing;
+                resolved = std::clamp(resolved, 0.001f, 0.999f);
+                adjusted = true;
+            }
+        }
+
+        if (!adjusted) {
+            break;
+        }
+    }
+
+    return resolved;
+}
+
+static void MoveParameterSetpointValue(
+    DeformParameter& parameter,
+    int parameterIndex,
+    float oldValue,
+    float newValue
+) {
+    if (NearlyEqualSetpointValue(oldValue, newValue)) {
+        return;
+    }
+
+    for (DeformParameterLayerState& state : parameter.layers) {
+        for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+            if (NearlyEqualSetpointValue(setpoint.value, oldValue)) {
+                setpoint.value = newValue;
+            }
+        }
+        SortParameterSetpoints(state);
+
+        for (DeformParameterMeshCorner& corner : state.meshCorners) {
+            for (std::size_t i = 0; i < corner.parameterIndices.size() && i < corner.parameterValues.size(); ++i) {
+                if (
+                    corner.parameterIndices[i] == parameterIndex &&
+                    NearlyEqualSetpointValue(corner.parameterValues[i], oldValue)
+                ) {
+                    corner.parameterValues[i] = newValue;
+                }
+            }
+        }
+    }
+}
+
+static void DeleteParameterSetpointValue(
+    DeformParameter& parameter,
+    int parameterIndex,
+    float value
+) {
+    if (IsEndpointSetpointValue(value)) {
+        return;
+    }
+
+    for (DeformParameterLayerState& state : parameter.layers) {
+        state.setpoints.erase(
+            std::remove_if(
+                state.setpoints.begin(),
+                state.setpoints.end(),
+                [&](const DeformParameterLayerSetpoint& setpoint) {
+                    return NearlyEqualSetpointValue(setpoint.value, value);
+                }
+            ),
+            state.setpoints.end()
+        );
+        EnsureParameterLayerSetpoints(state);
+
+        state.meshCorners.erase(
+            std::remove_if(
+                state.meshCorners.begin(),
+                state.meshCorners.end(),
+                [&](const DeformParameterMeshCorner& corner) {
+                    for (std::size_t i = 0; i < corner.parameterIndices.size() && i < corner.parameterValues.size(); ++i) {
+                        if (
+                            corner.parameterIndices[i] == parameterIndex &&
+                            NearlyEqualSetpointValue(corner.parameterValues[i], value)
+                        ) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            ),
+            state.meshCorners.end()
+        );
+    }
+}
+
+static DeformParameterLayerSetpoint EvaluateLayerSetpoint(
+    const DeformParameterLayerState& state,
+    float value
+);
+static void UpsertLayerSetpoint(
+    DeformParameterLayerState& state,
+    const DeformParameterLayerSetpoint& setpoint
+);
+static void ApplyAllDeformParameters(EditorState& editor);
+
+struct AlignMeshVertexBinding {
+    std::uint32_t targetVertex = 0;
+    std::uint32_t sourceA = 0;
+    std::uint32_t sourceB = 0;
+    std::uint32_t sourceC = 0;
+    float wa = 0.0f;
+    float wb = 0.0f;
+    float wc = 0.0f;
+};
+
+static bool ComputeBarycentric(
+    Vec2 p,
+    Vec2 a,
+    Vec2 b,
+    Vec2 c,
+    float& wa,
+    float& wb,
+    float& wc
+) {
+    const Vec2 v0{b.x - a.x, b.y - a.y};
+    const Vec2 v1{c.x - a.x, c.y - a.y};
+    const Vec2 v2{p.x - a.x, p.y - a.y};
+    const float d00 = Dot(v0, v0);
+    const float d01 = Dot(v0, v1);
+    const float d11 = Dot(v1, v1);
+    const float d20 = Dot(v2, v0);
+    const float d21 = Dot(v2, v1);
+    const float denom = d00 * d11 - d01 * d01;
+    if (std::abs(denom) <= 0.000001f) {
+        return false;
+    }
+
+    wb = (d11 * d20 - d01 * d21) / denom;
+    wc = (d00 * d21 - d01 * d20) / denom;
+    wa = 1.0f - wb - wc;
+    return true;
+}
+
+static bool BarycentricInsideTriangle(float wa, float wb, float wc) {
+    constexpr float epsilon = 0.0005f;
+    return wa >= -epsilon && wb >= -epsilon && wc >= -epsilon;
+}
+
+static bool FindSourceTriangleBinding(
+    const LayerMesh& sourceMesh,
+    Vec2 targetPoint,
+    AlignMeshVertexBinding& binding
+) {
+    for (std::size_t i = 0; i + 2u < sourceMesh.indices.size(); i += 3u) {
+        const std::uint32_t ia = sourceMesh.indices[i + 0u];
+        const std::uint32_t ib = sourceMesh.indices[i + 1u];
+        const std::uint32_t ic = sourceMesh.indices[i + 2u];
+        if (
+            ia >= sourceMesh.vertices.size() ||
+            ib >= sourceMesh.vertices.size() ||
+            ic >= sourceMesh.vertices.size()
+        ) {
+            continue;
+        }
+
+        float wa = 0.0f;
+        float wb = 0.0f;
+        float wc = 0.0f;
+        if (!ComputeBarycentric(
+            targetPoint,
+            sourceMesh.vertices[ia].position,
+            sourceMesh.vertices[ib].position,
+            sourceMesh.vertices[ic].position,
+            wa,
+            wb,
+            wc
+        )) {
+            continue;
+        }
+
+        if (!BarycentricInsideTriangle(wa, wb, wc)) {
+            continue;
+        }
+
+        binding.sourceA = ia;
+        binding.sourceB = ib;
+        binding.sourceC = ic;
+        binding.wa = wa;
+        binding.wb = wb;
+        binding.wc = wc;
+        return true;
+    }
+
+    return false;
+}
+
+static Vec2 EvaluateBoundSourcePoint(
+    const LayerMesh& sourceMesh,
+    const AlignMeshVertexBinding& binding
+) {
+    if (
+        binding.sourceA >= sourceMesh.vertices.size() ||
+        binding.sourceB >= sourceMesh.vertices.size() ||
+        binding.sourceC >= sourceMesh.vertices.size()
+    ) {
+        return Vec2{};
+    }
+
+    const Vec2 a = sourceMesh.vertices[binding.sourceA].position;
+    const Vec2 b = sourceMesh.vertices[binding.sourceB].position;
+    const Vec2 c = sourceMesh.vertices[binding.sourceC].position;
+    return Vec2{
+        a.x * binding.wa + b.x * binding.wb + c.x * binding.wc,
+        a.y * binding.wa + b.y * binding.wb + c.y * binding.wc
+    };
+}
+
+static void InitializeAlignMeshesDefaults(EditorState& editor) {
+    if (
+        !IsValidLayerIndex(editor, editor.alignMeshesTargetLayer) &&
+        IsValidLayerIndex(editor, editor.selectedLayer)
+    ) {
+        editor.alignMeshesTargetLayer = editor.selectedLayer;
+    }
+    if (!IsValidLayerIndex(editor, editor.alignMeshesTargetLayer) && !editor.document.layers.empty()) {
+        editor.alignMeshesTargetLayer = 0;
+    }
+
+    if (!IsValidLayerIndex(editor, editor.alignMeshesSourceLayer)) {
+        editor.alignMeshesSourceLayer = editor.document.layers.size() > 1u ? 1 : 0;
+    }
+    if (editor.alignMeshesSourceLayer == editor.alignMeshesTargetLayer && editor.document.layers.size() > 1u) {
+        editor.alignMeshesSourceLayer = editor.alignMeshesTargetLayer == 0 ? 1 : 0;
+    }
+
+    if (
+        editor.alignMeshesParameter < 0 ||
+        editor.alignMeshesParameter >= static_cast<int>(editor.parameters.size())
+    ) {
+        editor.alignMeshesParameter = editor.selectedParameter >= 0
+            ? editor.selectedParameter
+            : (editor.parameters.empty() ? -1 : 0);
+    }
+}
+
+static bool AlignMeshesForParameter(EditorState& editor) {
+    const int targetLayer = editor.alignMeshesTargetLayer;
+    const int sourceLayer = editor.alignMeshesSourceLayer;
+    const int parameterIndex = editor.alignMeshesParameter;
+    if (
+        !IsValidLayerIndex(editor, targetLayer) ||
+        !IsValidLayerIndex(editor, sourceLayer) ||
+        targetLayer == sourceLayer ||
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size())
+    ) {
+        editor.statusText = "Align meshes needs two layers and a parameter.";
+        return false;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    if (!parameter.affectsMesh) {
+        editor.statusText = "Align meshes needs a parameter that can edit meshes.";
+        return false;
+    }
+
+    DeformParameterLayerState* targetState = FindParameterLayerState(parameter, targetLayer);
+    DeformParameterLayerState* sourceState = FindParameterLayerState(parameter, sourceLayer);
+    if (!targetState || !sourceState) {
+        editor.statusText = "Both layers must be assigned to the selected parameter.";
+        return false;
+    }
+
+    EnsureParameterLayerSetpoints(*targetState);
+    EnsureParameterLayerSetpoints(*sourceState);
+
+    const float startValue = std::clamp(editor.alignMeshesStartSetpoint, 0.0f, 1.0f);
+    const LayerMesh targetStart = EvaluateLayerSetpoint(*targetState, startValue).mesh;
+    const LayerMesh sourceStart = EvaluateLayerSetpoint(*sourceState, startValue).mesh;
+    if (targetStart.vertices.empty() || sourceStart.vertices.empty() || sourceStart.indices.empty()) {
+        editor.statusText = "Align meshes needs valid target vertices and source triangles.";
+        return false;
+    }
+
+    std::vector<AlignMeshVertexBinding> bindings;
+    bindings.reserve(targetStart.vertices.size());
+    for (std::size_t i = 0; i < targetStart.vertices.size(); ++i) {
+        AlignMeshVertexBinding binding;
+        binding.targetVertex = static_cast<std::uint32_t>(i);
+        if (FindSourceTriangleBinding(sourceStart, targetStart.vertices[i].position, binding)) {
+            bindings.push_back(binding);
+        }
+    }
+
+    if (bindings.empty()) {
+        editor.statusText = "No target vertices were inside the source mesh.";
+        return false;
+    }
+
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    const std::vector<float> setpointValues = CollectParameterSetpointValues(parameter);
+
+    for (const float setpointValue : setpointValues) {
+        LayerMesh targetMesh = EvaluateLayerSetpoint(*targetState, setpointValue).mesh;
+        const LayerMesh sourceMesh = EvaluateLayerSetpoint(*sourceState, setpointValue).mesh;
+        if (!MeshTopologyMatches(sourceStart, sourceMesh)) {
+            continue;
+        }
+
+        for (const AlignMeshVertexBinding& binding : bindings) {
+            if (binding.targetVertex >= targetMesh.vertices.size()) {
+                continue;
+            }
+
+            targetMesh.vertices[binding.targetVertex].position =
+                EvaluateBoundSourcePoint(sourceMesh, binding);
+        }
+
+        DeformParameterLayerSetpoint setpoint = EvaluateLayerSetpoint(*targetState, setpointValue);
+        setpoint.value = setpointValue;
+        setpoint.mesh = std::move(targetMesh);
+        UpsertLayerSetpoint(*targetState, setpoint);
+
+        if (NearlyEqualSetpointValue(setpointValue, 0.0f)) {
+            targetState->meshAt0 = setpoint.mesh;
+        } else if (NearlyEqualSetpointValue(setpointValue, 1.0f)) {
+            targetState->meshAt1 = setpoint.mesh;
+        }
+    }
+
+    editor.selectedParameter = parameterIndex;
+    PushParameterOperation(
+        editor,
+        parametersBefore,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Align meshes"
+    );
+    ApplyAllDeformParameters(editor);
+    editor.statusText =
+        "Aligned " + std::to_string(bindings.size()) + " target vertex" +
+        (bindings.size() == 1u ? "." : "es.");
+    return true;
+}
+
 static const DeformParameterLayerSetpoint* FindLayerSetpointAtValue(
     const DeformParameterLayerState& state,
     float value
@@ -132,7 +781,7 @@ static DeformParameterLayerSetpoint EvaluateLayerSetpoint(
     const DeformParameterLayerState& state,
     float value
 ) {
-    const float tValue = std::clamp(value, 0.0f, 1.0f);
+    const float tValue = value;
     if (state.setpoints.empty()) {
         return MakeSetpointFromState(state, tValue <= 0.5f ? 0.0f : 1.0f);
     }
@@ -242,7 +891,7 @@ static std::vector<int> CollectMeshParametersForLayer(const EditorState& editor,
 
     for (int parameterIndex = 0; parameterIndex < static_cast<int>(editor.parameters.size()); ++parameterIndex) {
         const DeformParameter& parameter = editor.parameters[parameterIndex];
-        if (!parameter.affectsMesh || !FindParameterLayerState(parameter, layerIndex)) {
+        if (IsStateParameter(parameter) || !parameter.affectsMesh || !FindParameterLayerState(parameter, layerIndex)) {
             continue;
         }
 
@@ -299,6 +948,13 @@ static const DeformParameterMeshCorner* FindMeshCorner(
     return nullptr;
 }
 
+static LayerMesh BuildSeedMeshForMultilinearCornerValues(
+    const EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues
+);
+
 static bool BuildFallbackMultilinearCornerMesh(
     const EditorState& editor,
     int layerIndex,
@@ -306,49 +962,12 @@ static bool BuildFallbackMultilinearCornerMesh(
     const std::vector<float>& parameterValues,
     LayerMesh& mesh
 ) {
-    const DeformParameterLayerState* baseState = nullptr;
-    for (const int parameterIndex : parameterIndices) {
-        baseState = FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
-        if (baseState) {
-            break;
-        }
-    }
-
-    if (!baseState) {
-        return false;
-    }
-
-    mesh = EvaluateLayerSetpoint(*baseState, 0.0f).mesh;
-
-    for (std::size_t parameterOffset = 0; parameterOffset < parameterIndices.size(); ++parameterOffset) {
-        const int parameterIndex = parameterIndices[parameterOffset];
-        const DeformParameterLayerState* state =
-            FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
-        if (!state) {
-            continue;
-        }
-
-        const DeformParameterLayerSetpoint baseSetpoint = EvaluateLayerSetpoint(*state, 0.0f);
-        const DeformParameterLayerSetpoint evaluatedSetpoint =
-            EvaluateLayerSetpoint(*state, parameterValues[parameterOffset]);
-
-        if (
-            !MeshTopologyMatches(mesh, baseSetpoint.mesh) ||
-            !MeshTopologyMatches(mesh, evaluatedSetpoint.mesh)
-        ) {
-            return false;
-        }
-
-        for (std::size_t vertexIndex = 0; vertexIndex < mesh.vertices.size(); ++vertexIndex) {
-            mesh.vertices[vertexIndex].position.x +=
-                evaluatedSetpoint.mesh.vertices[vertexIndex].position.x -
-                baseSetpoint.mesh.vertices[vertexIndex].position.x;
-            mesh.vertices[vertexIndex].position.y +=
-                evaluatedSetpoint.mesh.vertices[vertexIndex].position.y -
-                baseSetpoint.mesh.vertices[vertexIndex].position.y;
-        }
-    }
-
+    mesh = BuildSeedMeshForMultilinearCornerValues(
+        editor,
+        layerIndex,
+        parameterIndices,
+        parameterValues
+    );
     return true;
 }
 
@@ -541,11 +1160,61 @@ static bool CornerMatchesRequestedBits(
     return true;
 }
 
-static LayerMesh BuildSeedMeshForMultilinearCorner(
+static bool CornerMatchesRequestedValues(
+    const DeformParameterMeshCorner& corner,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues
+) {
+    if (corner.parameterIndices.size() != corner.parameterValues.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < corner.parameterIndices.size(); ++i) {
+        const auto it = std::find(
+            parameterIndices.begin(),
+            parameterIndices.end(),
+            corner.parameterIndices[i]
+        );
+        if (it == parameterIndices.end()) {
+            return false;
+        }
+
+        const std::size_t targetIndex = static_cast<std::size_t>(std::distance(parameterIndices.begin(), it));
+        if (
+            targetIndex >= cornerValues.size() ||
+            !NearlyEqualSetpointValue(corner.parameterValues[i], cornerValues[targetIndex])
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static std::vector<std::uint8_t> FindRepresentedParametersForCorner(
+    const DeformParameterMeshCorner* corner,
+    const std::vector<int>& parameterIndices
+) {
+    std::vector<std::uint8_t> represented(parameterIndices.size(), 0u);
+    if (!corner) {
+        return represented;
+    }
+
+    for (const int cornerParameterIndex : corner->parameterIndices) {
+        const auto it = std::find(parameterIndices.begin(), parameterIndices.end(), cornerParameterIndex);
+        if (it != parameterIndices.end()) {
+            represented[static_cast<std::size_t>(std::distance(parameterIndices.begin(), it))] = 1u;
+        }
+    }
+
+    return represented;
+}
+
+static LayerMesh BuildSeedMeshForMultilinearCornerValues(
     const EditorState& editor,
     int layerIndex,
     const std::vector<int>& parameterIndices,
-    std::uint32_t cornerBits
+    const std::vector<float>& cornerValues
 ) {
     LayerMesh fallbackMesh = editor.document.layers[layerIndex].mesh;
     const DeformParameterLayerState* baseState = nullptr;
@@ -566,7 +1235,7 @@ static LayerMesh BuildSeedMeshForMultilinearCorner(
         for (const DeformParameterMeshCorner& corner : state->meshCorners) {
             if (
                 corner.parameterIndices.size() > bestExistingCornerParameterCount &&
-                CornerMatchesRequestedBits(corner, parameterIndices, cornerBits) &&
+                CornerMatchesRequestedValues(corner, parameterIndices, cornerValues) &&
                 MeshTopologyMatches(fallbackMesh, corner.mesh)
             ) {
                 bestExistingCorner = &corner;
@@ -575,31 +1244,71 @@ static LayerMesh BuildSeedMeshForMultilinearCorner(
         }
     }
 
+    std::vector<std::uint8_t> represented =
+        FindRepresentedParametersForCorner(bestExistingCorner, parameterIndices);
+
+    LayerMesh seedMesh;
     if (bestExistingCorner) {
-        return bestExistingCorner->mesh;
-    }
-
-    if (!baseState || !MeshTopologyMatches(fallbackMesh, baseState->meshAt0)) {
+        seedMesh = bestExistingCorner->mesh;
+    } else if (!baseState || !MeshTopologyMatches(fallbackMesh, baseState->meshAt0)) {
         return fallbackMesh;
+    } else {
+        seedMesh = EvaluateLayerSetpoint(*baseState, 0.0f).mesh;
     }
 
-    LayerMesh seedMesh = baseState->meshAt0;
     for (std::size_t parameterOffset = 0; parameterOffset < parameterIndices.size(); ++parameterOffset) {
-        if (((cornerBits >> parameterOffset) & 1u) == 0u) {
+        if (represented[parameterOffset]) {
             continue;
         }
 
         const int parameterIndex = parameterIndices[parameterOffset];
         const DeformParameterLayerState* state =
             FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
-        if (!state || !CanAccumulateParameterState(seedMesh, *state)) {
+        if (!state) {
             continue;
         }
 
-        AccumulateParameterMeshDelta(seedMesh, *state, 1.0f);
+        const DeformParameterLayerSetpoint baseSetpoint = EvaluateLayerSetpoint(*state, 0.0f);
+        const DeformParameterLayerSetpoint evaluatedSetpoint =
+            EvaluateLayerSetpoint(*state, cornerValues[parameterOffset]);
+        if (
+            !MeshTopologyMatches(seedMesh, baseSetpoint.mesh) ||
+            !MeshTopologyMatches(seedMesh, evaluatedSetpoint.mesh)
+        ) {
+            continue;
+        }
+
+        for (std::size_t vertexIndex = 0; vertexIndex < seedMesh.vertices.size(); ++vertexIndex) {
+            seedMesh.vertices[vertexIndex].position.x +=
+                evaluatedSetpoint.mesh.vertices[vertexIndex].position.x -
+                baseSetpoint.mesh.vertices[vertexIndex].position.x;
+            seedMesh.vertices[vertexIndex].position.y +=
+                evaluatedSetpoint.mesh.vertices[vertexIndex].position.y -
+                baseSetpoint.mesh.vertices[vertexIndex].position.y;
+        }
     }
 
     return seedMesh;
+}
+
+static LayerMesh BuildSeedMeshForMultilinearCorner(
+    const EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    std::uint32_t cornerBits
+) {
+    std::vector<float> cornerValues;
+    cornerValues.reserve(parameterIndices.size());
+    for (std::size_t i = 0; i < parameterIndices.size(); ++i) {
+        cornerValues.push_back(((cornerBits >> i) & 1u) ? 1.0f : 0.0f);
+    }
+
+    return BuildSeedMeshForMultilinearCornerValues(
+        editor,
+        layerIndex,
+        parameterIndices,
+        cornerValues
+    );
 }
 
 static void EnsureMultilinearMeshCornersForLayer(EditorState& editor, int layerIndex) {
@@ -667,8 +1376,9 @@ static bool StoreCurrentMeshCornerForLayer(EditorState& editor, int layerIndex, 
 
 static void ApplyAllDeformParameters(EditorState& editor) {
     for (DeformParameter& parameter : editor.parameters) {
+        EnsureStateParameterDefaults(parameter);
         for (DeformParameterLayerState& state : parameter.layers) {
-            EnsureParameterLayerSetpoints(state);
+            EnsureStateParameterLayerSetpoints(parameter, state);
         }
     }
 
@@ -677,6 +1387,7 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         const DeformParameterLayerState* opacityBaseState = nullptr;
         const DeformParameterLayerState* renderOrderBaseState = nullptr;
         const DeformParameterLayerState* maskingBaseState = nullptr;
+        const DeformParameterLayerState* textureBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
             if (!state) {
@@ -695,14 +1406,18 @@ static void ApplyAllDeformParameters(EditorState& editor) {
             if (parameter.affectsMasking && !maskingBaseState) {
                 maskingBaseState = state;
             }
+            if (parameter.affectsTexture && !textureBaseState) {
+                textureBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState) {
             continue;
         }
 
         EditorLayer& layer = editor.document.layers[layerIndex];
         LayerMesh resultMesh = meshBaseState ? EvaluateLayerSetpoint(*meshBaseState, 0.0f).mesh : layer.mesh;
+        int resultTextureIndex = textureBaseState ? EvaluateLayerSetpoint(*textureBaseState, 0.0f).textureIndex : layer.textureIndex;
         float resultOpacity = opacityBaseState ? EvaluateLayerSetpoint(*opacityBaseState, 0.0f).opacity : layer.opacity;
         std::string resultRenderOrderOverride = renderOrderBaseState
             ? renderOrderBaseState->renderOrderOverrideAt0
@@ -720,7 +1435,7 @@ static void ApplyAllDeformParameters(EditorState& editor) {
                 continue;
             }
 
-            const float value = std::clamp(parameter.value, 0.0f, 1.0f);
+            const float value = ParameterEvaluationValue(parameter);
             if (!usingMultilinearMesh && parameter.affectsMesh && CanAccumulateParameterState(resultMesh, *state)) {
                 AccumulateParameterMeshSetpointDelta(resultMesh, *state, value);
             }
@@ -728,6 +1443,9 @@ static void ApplyAllDeformParameters(EditorState& editor) {
                 resultOpacity +=
                     EvaluateLayerSetpoint(*state, value).opacity -
                     EvaluateLayerSetpoint(*state, 0.0f).opacity;
+            }
+            if (parameter.affectsTexture) {
+                resultTextureIndex = EvaluateLayerSetpoint(*state, value).textureIndex;
             }
 
             if (parameter.affectsRenderOrder && value <= 0.001f) {
@@ -750,6 +1468,9 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         }
 
         layer.mesh = std::move(resultMesh);
+        if (resultTextureIndex != layer.textureIndex) {
+            ApplyTextureToLayer(editor.document, layer, resultTextureIndex);
+        }
         layer.opacity = std::clamp(resultOpacity, 0.0f, 1.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
@@ -822,6 +1543,8 @@ static DeformParameterLayerState CreateParameterLayerStateForLayer(
     state.layerIndex = layerIndex;
     state.meshAt0 = layer.mesh;
     state.meshAt1 = layer.mesh;
+    state.textureIndexAt0 = layer.textureIndex;
+    state.textureIndexAt1 = layer.textureIndex;
     state.opacityAt0 = layer.opacity;
     state.opacityAt1 = layer.opacity;
     state.renderOrderOverrideAt0 = layer.renderOrderOverride;
@@ -832,7 +1555,7 @@ static DeformParameterLayerState CreateParameterLayerStateForLayer(
     return state;
 }
 
-static void AddDeformParameter(EditorState& editor) {
+static void AddDeformParameter(EditorState& editor, DeformParameterType type = DeformParameterType::Slider) {
     if (editor.selectedLayers.empty()) {
         return;
     }
@@ -842,17 +1565,32 @@ static void AddDeformParameter(EditorState& editor) {
 
     DeformParameter parameter;
     parameter.name = "Parameter " + std::to_string(editor.parameters.size() + 1u);
+    parameter.type = type;
     parameter.value = 0.0f;
+    parameter.affectsMesh = true;
+    parameter.affectsRenderOrder = false;
+    parameter.affectsMasking = false;
+    parameter.affectsOpacity = false;
+    parameter.affectsTexture = false;
+    if (type == DeformParameterType::State) {
+        parameter.stateNames.push_back("Default");
+        parameter.selectedState = 0;
+    }
 
     for (const int layerIndex : editor.selectedLayers) {
         if (!IsValidLayerIndex(editor, layerIndex)) {
             continue;
         }
 
-        parameter.layers.push_back(CreateParameterLayerStateForLayer(
+        DeformParameterLayerState state = CreateParameterLayerStateForLayer(
             editor.document.layers[layerIndex],
             layerIndex
-        ));
+        );
+        if (type == DeformParameterType::State) {
+            state.setpoints.clear();
+            state.setpoints.push_back(MakeStateSetpointFromLayer(editor.document.layers[layerIndex], 0));
+        }
+        parameter.layers.push_back(std::move(state));
     }
 
     if (parameter.layers.empty()) {
@@ -872,6 +1610,131 @@ static void AddDeformParameter(EditorState& editor) {
         editor.selectedParameter,
         "Add parameter"
     );
+}
+
+static void AddStateToParameter(EditorState& editor, int parameterIndex, const std::string& stateName) {
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        !IsStateParameter(editor.parameters[parameterIndex])
+    ) {
+        return;
+    }
+
+    const std::vector<DeformParameter> before = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    const int stateIndex = static_cast<int>(parameter.stateNames.size());
+    parameter.stateNames.push_back(stateName.empty() ? "State " + std::to_string(stateIndex + 1) : stateName);
+
+    for (DeformParameterLayerState& state : parameter.layers) {
+        if (!IsValidLayerIndex(editor, state.layerIndex)) {
+            continue;
+        }
+        state.setpoints.push_back(MakeStateSetpointFromLayer(
+            editor.document.layers[state.layerIndex],
+            stateIndex
+        ));
+        SortParameterSetpoints(state);
+    }
+
+    parameter.selectedState = stateIndex;
+    parameter.value = static_cast<float>(stateIndex);
+    editor.selectedParameter = parameterIndex;
+    PushParameterOperation(
+        editor,
+        before,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Add parameter state"
+    );
+    ApplyAllDeformParameters(editor);
+}
+
+static void RenameParameterState(
+    EditorState& editor,
+    int parameterIndex,
+    int stateIndex,
+    const std::string& name
+) {
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        !IsStateParameter(editor.parameters[parameterIndex])
+    ) {
+        return;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(parameter.stateNames.size()) || parameter.stateNames[stateIndex] == name) {
+        return;
+    }
+
+    const std::vector<DeformParameter> before = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    parameter.stateNames[stateIndex] = name.empty() ? "State " + std::to_string(stateIndex + 1) : name;
+    PushParameterOperation(
+        editor,
+        before,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Rename parameter state"
+    );
+}
+
+static void DeleteParameterState(EditorState& editor, int parameterIndex, int stateIndex) {
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        !IsStateParameter(editor.parameters[parameterIndex])
+    ) {
+        return;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    if (parameter.stateNames.size() <= 1u || stateIndex < 0 || stateIndex >= static_cast<int>(parameter.stateNames.size())) {
+        return;
+    }
+
+    const std::vector<DeformParameter> before = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    parameter.stateNames.erase(parameter.stateNames.begin() + stateIndex);
+    for (DeformParameterLayerState& state : parameter.layers) {
+        state.setpoints.erase(
+            std::remove_if(
+                state.setpoints.begin(),
+                state.setpoints.end(),
+                [&](const DeformParameterLayerSetpoint& setpoint) {
+                    return NearlyEqualSetpointValue(setpoint.value, static_cast<float>(stateIndex));
+                }
+            ),
+            state.setpoints.end()
+        );
+        for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+            if (setpoint.value > static_cast<float>(stateIndex)) {
+                setpoint.value -= 1.0f;
+            }
+        }
+        EnsureStateParameterLayerSetpoints(parameter, state);
+    }
+    parameter.selectedState = std::clamp(
+        parameter.selectedState >= stateIndex ? parameter.selectedState - 1 : parameter.selectedState,
+        0,
+        static_cast<int>(parameter.stateNames.size()) - 1
+    );
+    parameter.value = static_cast<float>(parameter.selectedState);
+    editor.selectedParameter = parameterIndex;
+    PushParameterOperation(
+        editor,
+        before,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Delete parameter state"
+    );
+    ApplyAllDeformParameters(editor);
 }
 
 static bool ParameterHasLayer(const DeformParameter& parameter, int layerIndex) {
@@ -910,10 +1773,21 @@ static void ToggleParameterLayerMembership(
     );
 
     if (it == parameter.layers.end()) {
-        parameter.layers.push_back(CreateParameterLayerStateForLayer(
+        DeformParameterLayerState state = CreateParameterLayerStateForLayer(
             editor.document.layers[layerIndex],
             layerIndex
-        ));
+        );
+        if (IsStateParameter(parameter)) {
+            state.setpoints.clear();
+            const int stateCount = std::max(1, static_cast<int>(parameter.stateNames.size()));
+            for (int stateIndex = 0; stateIndex < stateCount; ++stateIndex) {
+                state.setpoints.push_back(MakeStateSetpointFromLayer(
+                    editor.document.layers[layerIndex],
+                    stateIndex
+                ));
+            }
+        }
+        parameter.layers.push_back(std::move(state));
         EnsureMultilinearMeshCornersForLayer(editor, layerIndex);
     } else {
         parameter.layers.erase(it);
@@ -1029,9 +1903,27 @@ static void UpdateActiveParameterEndpointForLayers(
     DeformParameter& parameter = editor.parameters[editor.selectedParameter];
     (void)layerIndices;
 
-    const float setpointValue = std::clamp(parameter.value, 0.0f, 1.0f);
-    const bool updateZero = setpointValue <= 0.001f;
-    const bool updateOne = setpointValue >= 0.999f;
+    const float setpointValue = ParameterEvaluationValue(parameter);
+    constexpr float existingSetpointSnapRadius = 0.05f;
+    float effectiveSetpointValue = setpointValue;
+    if (!IsStateParameter(parameter) &&
+        FindNearbyParameterSetpointValue(
+            parameter,
+            setpointValue,
+            existingSetpointSnapRadius,
+            effectiveSetpointValue
+        ) &&
+        !NearlyEqualSetpointValue(effectiveSetpointValue, setpointValue)
+    ) {
+        parameter.value = parameter.value + (effectiveSetpointValue - parameter.value) * 0.35f;
+        if (std::abs(parameter.value - effectiveSetpointValue) <= 0.002f) {
+            parameter.value = effectiveSetpointValue;
+        }
+        editor.statusText = "Editing nearby parameter setpoint " + std::to_string(effectiveSetpointValue) + ".";
+    }
+
+    const bool updateZero = !IsStateParameter(parameter) && effectiveSetpointValue <= 0.001f;
+    const bool updateOne = !IsStateParameter(parameter) && effectiveSetpointValue >= 0.999f;
 
     for (DeformParameterLayerState& parameterLayerState : parameter.layers) {
         const int layerIndex = parameterLayerState.layerIndex;
@@ -1040,7 +1932,7 @@ static void UpdateActiveParameterEndpointForLayers(
         }
 
         DeformParameterLayerState* state = &parameterLayerState;
-        EnsureParameterLayerSetpoints(*state);
+        EnsureStateParameterLayerSetpoints(parameter, *state);
 
         const EditorLayer& layer = editor.document.layers[layerIndex];
         const LayerMesh endpointMesh = MeshWithoutOtherParameterDeltas(
@@ -1058,10 +1950,13 @@ static void UpdateActiveParameterEndpointForLayers(
         const bool storedMultilinearMeshCorner =
             parameter.affectsMesh && StoreCurrentMeshCornerForLayer(editor, layerIndex, layer.mesh);
 
-        DeformParameterLayerSetpoint setpoint = EvaluateLayerSetpoint(*state, setpointValue);
-        setpoint.value = setpointValue;
+        DeformParameterLayerSetpoint setpoint = EvaluateLayerSetpoint(*state, effectiveSetpointValue);
+        setpoint.value = effectiveSetpointValue;
         if (parameter.affectsMesh) {
             setpoint.mesh = storedMultilinearMeshCorner ? layer.mesh : endpointMesh;
+        }
+        if (parameter.affectsTexture) {
+            setpoint.textureIndex = layer.textureIndex;
         }
         if (parameter.affectsOpacity) {
             setpoint.opacity = endpointOpacity;
@@ -1078,6 +1973,9 @@ static void UpdateActiveParameterEndpointForLayers(
             if (parameter.affectsMesh && !storedMultilinearMeshCorner) {
                 state->meshAt0 = endpointMesh;
             }
+            if (parameter.affectsTexture) {
+                state->textureIndexAt0 = layer.textureIndex;
+            }
             if (parameter.affectsOpacity) {
                 state->opacityAt0 = endpointOpacity;
             }
@@ -1090,6 +1988,9 @@ static void UpdateActiveParameterEndpointForLayers(
         } else if (updateOne) {
             if (parameter.affectsMesh && !storedMultilinearMeshCorner) {
                 state->meshAt1 = endpointMesh;
+            }
+            if (parameter.affectsTexture) {
+                state->textureIndexAt1 = layer.textureIndex;
             }
             if (parameter.affectsOpacity) {
                 state->opacityAt1 = endpointOpacity;
@@ -1105,6 +2006,8 @@ static void UpdateActiveParameterEndpointForLayers(
 }
 
 static bool DrawParameterSetpointMarkersAndHandleSnap(
+    EditorState& editor,
+    int parameterIndex,
     const std::vector<float>& setpoints,
     float& value
 ) {
@@ -1120,43 +2023,276 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
     const ImU32 markerShadow = IM_COL32(20, 20, 20, 180);
 
     for (const float setpoint : setpoints) {
+        const bool selected =
+            editor.selectedParameterSetpointParameter == parameterIndex &&
+            NearlyEqualSetpointValue(editor.selectedParameterSetpointValue, setpoint);
         const float x = sliderMin.x + sliderWidth * setpoint;
         drawList->AddLine(
             ImVec2(x, sliderMin.y + 2.0f),
             ImVec2(x, sliderMax.y - 2.0f),
             markerShadow,
-            3.0f
+            selected ? 6.0f : 3.0f
         );
         drawList->AddLine(
             ImVec2(x, sliderMin.y + 2.0f),
             ImVec2(x, sliderMax.y - 2.0f),
             markerColor,
-            1.5f
+            selected ? 3.5f : 1.5f
         );
-    }
-
-    if (!ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-        return false;
     }
 
     const ImGuiIO& io = ImGui::GetIO();
     const float snapRadius = 10.0f;
+
+    auto mouseIsNearSlider = [&]() {
+        return
+            io.MousePos.y >= sliderMin.y - snapRadius &&
+            io.MousePos.y <= sliderMax.y + snapRadius;
+    };
+
     if (
-        io.MousePos.y < sliderMin.y - snapRadius ||
-        io.MousePos.y > sliderMax.y + snapRadius
+        editor.selectedParameterSetpointParameter == parameterIndex &&
+        editor.pendingParameterSetpointDrag &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Right)
     ) {
-        return false;
+        const float dragDistance = std::abs(io.MousePos.x - editor.parameterSetpointDragStartMouseX);
+        const double dragAge = ImGui::GetTime() - editor.parameterSetpointDragStartTime;
+        constexpr float dragDistanceThresholdPx = 4.0f;
+        constexpr double dragDelaySeconds = 0.12;
+        if (dragDistance >= dragDistanceThresholdPx && dragAge >= dragDelaySeconds) {
+            editor.pendingParameterSetpointDrag = false;
+            editor.draggingParameterSetpoint = true;
+        }
     }
 
-    for (const float setpoint : setpoints) {
-        const float x = sliderMin.x + sliderWidth * setpoint;
-        if (std::abs(io.MousePos.x - x) <= snapRadius) {
-            value = setpoint;
+    if (
+        editor.selectedParameterSetpointParameter == parameterIndex &&
+        editor.draggingParameterSetpoint &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Right)
+    ) {
+        DeformParameter& parameter = editor.parameters[parameterIndex];
+        const float oldValue = editor.selectedParameterSetpointValue;
+        if (!IsEndpointSetpointValue(oldValue)) {
+            const float requested = std::clamp(
+                editor.parameterSetpointDragStartValue +
+                    (io.MousePos.x - editor.parameterSetpointDragStartMouseX) / sliderWidth,
+                0.0f,
+                1.0f
+            );
+            const float moved = ResolveDraggedSetpointValue(parameter, oldValue, requested);
+            MoveParameterSetpointValue(parameter, parameterIndex, oldValue, moved);
+            editor.selectedParameterSetpointValue = moved;
+            value = moved;
+            return true;
+        }
+    }
+
+    if (
+        editor.selectedParameterSetpointParameter == parameterIndex &&
+        (editor.draggingParameterSetpoint || editor.pendingParameterSetpointDrag) &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right)
+    ) {
+        if (editor.draggingParameterSetpoint) {
+            PushParameterOperation(
+                editor,
+                editor.parameterSetpointDragBefore,
+                editor.parameterSetpointDragSelectedBefore,
+                editor.parameters,
+                editor.selectedParameter,
+                "Move parameter setpoint"
+            );
+        }
+        editor.draggingParameterSetpoint = false;
+        editor.pendingParameterSetpointDrag = false;
+        editor.parameterSetpointDragStartMouseX = 0.0f;
+        editor.parameterSetpointDragStartValue = 0.0f;
+        editor.parameterSetpointDragStartTime = 0.0;
+        editor.parameterSetpointDragBefore.clear();
+        editor.parameterSetpointDragSelectedBefore = -1;
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && mouseIsNearSlider()) {
+        bool foundSetpoint = false;
+        float nearestSetpoint = 0.0f;
+        float nearestDistance = snapRadius;
+        for (const float setpoint : setpoints) {
+            const float x = sliderMin.x + sliderWidth * setpoint;
+            const float distance = std::abs(io.MousePos.x - x);
+            if (distance <= nearestDistance) {
+                nearestDistance = distance;
+                nearestSetpoint = setpoint;
+                foundSetpoint = true;
+            }
+        }
+
+        if (foundSetpoint) {
+            ClearAllVertexSelection(editor);
+            editor.selectedLayers.clear();
+            editor.selectedLayer = -1;
+            editor.selectedParameter = parameterIndex;
+            editor.selectedParameterSetpointParameter = parameterIndex;
+            editor.selectedParameterSetpointValue = nearestSetpoint;
+            editor.draggingParameterSetpoint = false;
+            editor.pendingParameterSetpointDrag = !IsEndpointSetpointValue(nearestSetpoint);
+            if (editor.pendingParameterSetpointDrag) {
+                editor.parameterSetpointDragStartMouseX = io.MousePos.x;
+                editor.parameterSetpointDragStartValue = nearestSetpoint;
+                editor.parameterSetpointDragStartTime = ImGui::GetTime();
+                editor.parameterSetpointDragBefore = editor.parameters;
+                editor.parameterSetpointDragSelectedBefore = editor.selectedParameter;
+            }
+            value = nearestSetpoint;
             return true;
         }
     }
 
     return false;
+}
+
+static bool DeleteSelectedParameterSetpoint(EditorState& editor) {
+    const int parameterIndex = editor.selectedParameterSetpointParameter;
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        IsEndpointSetpointValue(editor.selectedParameterSetpointValue)
+    ) {
+        return false;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    if (!ParameterHasSetpointValue(parameter, editor.selectedParameterSetpointValue)) {
+        ClearParameterSetpointSelection(editor);
+        return false;
+    }
+
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    DeleteParameterSetpointValue(parameter, parameterIndex, editor.selectedParameterSetpointValue);
+    ClearParameterSetpointSelection(editor);
+    PushParameterOperation(
+        editor,
+        parametersBefore,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Delete parameter setpoint"
+    );
+    ApplyAllDeformParameters(editor);
+    editor.statusText = "Deleted parameter setpoint.";
+    return true;
+}
+
+static void DrawAlignMeshesPopup(EditorState& editor) {
+    if (!ImGui::BeginPopupModal("Align Meshes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    InitializeAlignMeshesDefaults(editor);
+
+    auto drawLayerCombo = [&](const char* label, int& layerIndex) {
+        const char* preview = IsValidLayerIndex(editor, layerIndex)
+            ? editor.document.layers[layerIndex].name.c_str()
+            : "None";
+        if (ImGui::BeginCombo(label, preview)) {
+            for (int i = 0; i < static_cast<int>(editor.document.layers.size()); ++i) {
+                const bool selectedLayer = layerIndex == i;
+                if (ImGui::Selectable(editor.document.layers[i].name.c_str(), selectedLayer)) {
+                    layerIndex = i;
+                }
+                if (selectedLayer) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    };
+
+    drawLayerCombo("Mesh To Transform", editor.alignMeshesTargetLayer);
+    drawLayerCombo("Align To Mesh", editor.alignMeshesSourceLayer);
+
+    const char* parameterPreview =
+        editor.alignMeshesParameter >= 0 &&
+        editor.alignMeshesParameter < static_cast<int>(editor.parameters.size())
+            ? editor.parameters[editor.alignMeshesParameter].name.c_str()
+            : "None";
+    if (ImGui::BeginCombo("Parameter", parameterPreview)) {
+        for (int i = 0; i < static_cast<int>(editor.parameters.size()); ++i) {
+            const bool selectedParameter = editor.alignMeshesParameter == i;
+            if (ImGui::Selectable(editor.parameters[i].name.c_str(), selectedParameter)) {
+                editor.alignMeshesParameter = i;
+                editor.alignMeshesStartSetpoint = std::clamp(
+                    editor.alignMeshesStartSetpoint,
+                    0.0f,
+                    1.0f
+                );
+            }
+            if (selectedParameter) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    if (
+        editor.alignMeshesParameter >= 0 &&
+        editor.alignMeshesParameter < static_cast<int>(editor.parameters.size())
+    ) {
+        const std::vector<float> setpoints =
+            CollectParameterSetpointValues(editor.parameters[editor.alignMeshesParameter]);
+        std::string setpointPreview = std::to_string(editor.alignMeshesStartSetpoint);
+        if (ImGui::BeginCombo("Starting Setpoint", setpointPreview.c_str())) {
+            for (const float setpoint : setpoints) {
+                char label[32] = {};
+                std::snprintf(label, sizeof(label), "%.2f", setpoint);
+                const bool selectedSetpoint =
+                    NearlyEqualSetpointValue(editor.alignMeshesStartSetpoint, setpoint);
+                if (ImGui::Selectable(label, selectedSetpoint)) {
+                    editor.alignMeshesStartSetpoint = setpoint;
+                }
+                if (selectedSetpoint) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    const bool validAlign =
+        IsValidLayerIndex(editor, editor.alignMeshesTargetLayer) &&
+        IsValidLayerIndex(editor, editor.alignMeshesSourceLayer) &&
+        editor.alignMeshesTargetLayer != editor.alignMeshesSourceLayer &&
+        editor.alignMeshesParameter >= 0 &&
+        editor.alignMeshesParameter < static_cast<int>(editor.parameters.size()) &&
+        editor.parameters[editor.alignMeshesParameter].affectsMesh &&
+        FindParameterLayerState(
+            editor.parameters[editor.alignMeshesParameter],
+            editor.alignMeshesTargetLayer
+        ) &&
+        FindParameterLayerState(
+            editor.parameters[editor.alignMeshesParameter],
+            editor.alignMeshesSourceLayer
+        );
+    if (!validAlign) {
+        ImGui::TextDisabled("Both layers must be different and assigned to a mesh-editing parameter.");
+    }
+
+    if (!validAlign) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("OK")) {
+        if (AlignMeshesForParameter(editor)) {
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    if (!validAlign) {
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }
 
 static void DrawDeformParametersPanel(EditorState& editor) {
@@ -1165,11 +2301,26 @@ static void DrawDeformParametersPanel(EditorState& editor) {
     if (editor.selectedLayers.empty()) {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Add Parameter")) {
-        AddDeformParameter(editor);
+    if (ImGui::Button("Add")) {
+        ImGui::OpenPopup("Add Parameter Type");
     }
     if (editor.selectedLayers.empty()) {
         ImGui::EndDisabled();
+    }
+
+    if (ImGui::BeginPopupModal("Add Parameter Type", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::Button("Slider", ImVec2(160.0f, 0.0f))) {
+            AddDeformParameter(editor, DeformParameterType::Slider);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("State", ImVec2(160.0f, 0.0f))) {
+            AddDeformParameter(editor, DeformParameterType::State);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Cancel", ImVec2(160.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     ImGui::SameLine();
@@ -1201,6 +2352,9 @@ static void DrawDeformParametersPanel(EditorState& editor) {
 
         const bool selected = editor.selectedParameter == i;
         if (ImGui::Selectable(parameter.name.c_str(), selected)) {
+            if (editor.selectedParameterSetpointParameter != i) {
+                ClearParameterSetpointSelection(editor);
+            }
             editor.selectedParameter = i;
         }
         if (ImGui::BeginPopupContextItem("parameter_options")) {
@@ -1223,6 +2377,8 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                 );
             }
 
+            ImGui::Separator();
+            ImGui::Text("Type: %s", IsStateParameter(parameter) ? "State" : "Slider");
             ImGui::Separator();
             ImGui::TextUnformatted("Can Edit");
             ImGui::Separator();
@@ -1272,6 +2428,26 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                 }
             }
 
+            bool affectsTexture = parameter.affectsTexture;
+            if (ImGui::Checkbox("Textures", &affectsTexture)) {
+                const std::vector<DeformParameter> before = editor.parameters;
+                const int selectedBefore = editor.selectedParameter;
+                parameter.affectsTexture = affectsTexture;
+                for (DeformParameterLayerState& state : parameter.layers) {
+                    if (!IsValidLayerIndex(editor, state.layerIndex)) {
+                        continue;
+                    }
+
+                    const int neutralTexture = editor.document.layers[state.layerIndex].textureIndex;
+                    state.textureIndexAt0 = neutralTexture;
+                    state.textureIndexAt1 = neutralTexture;
+                    for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                        setpoint.textureIndex = neutralTexture;
+                    }
+                }
+                PushParameterChannelOperation(editor, before, selectedBefore, "Change parameter channels");
+            }
+
             ImGui::Separator();
             ImGui::TextUnformatted("Layers");
             ImGui::BeginChild("parameter_layers", ImVec2(280.0f, 260.0f), ImGuiChildFlags_Borders);
@@ -1286,17 +2462,102 @@ static void DrawDeformParametersPanel(EditorState& editor) {
             ImGui::EndPopup();
         }
 
-        ImGui::SetNextItemWidth(-1.0f);
-        float value = parameter.value;
-        const bool sliderChanged = ImGui::SliderFloat("##value", &value, 0.0f, 1.0f, "%.2f");
-        const bool snappedToSetpoint = DrawParameterSetpointMarkersAndHandleSnap(
-            CollectParameterSetpointValues(parameter),
-            value
-        );
-        if (sliderChanged || snappedToSetpoint) {
-            parameter.value = value;
-            editor.selectedParameter = i;
-            ApplyAllDeformParameters(editor);
+        if (IsStateParameter(parameter)) {
+            EnsureStateParameterDefaults(parameter);
+            const char* preview = parameter.stateNames[static_cast<std::size_t>(parameter.selectedState)].c_str();
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##state", preview)) {
+                ImGui::BeginChild("states", ImVec2(0.0f, 180.0f), ImGuiChildFlags_Borders);
+                for (int stateIndex = 0; stateIndex < static_cast<int>(parameter.stateNames.size()); ++stateIndex) {
+                    ImGui::PushID(stateIndex);
+                    const bool stateSelected = stateIndex == parameter.selectedState;
+                    if (ImGui::Selectable(parameter.stateNames[stateIndex].c_str(), stateSelected)) {
+                        parameter.selectedState = stateIndex;
+                        parameter.value = static_cast<float>(stateIndex);
+                        editor.selectedParameter = i;
+                        ApplyAllDeformParameters(editor);
+                    }
+                    if (ImGui::BeginPopupContextItem("state_options")) {
+                        char stateNameBuffer[128] = {};
+                        std::strncpy(stateNameBuffer, parameter.stateNames[stateIndex].c_str(), sizeof(stateNameBuffer) - 1u);
+                        ImGui::SetNextItemWidth(220.0f);
+                        ImGui::InputText("Name", stateNameBuffer, sizeof(stateNameBuffer));
+                        if (ImGui::IsItemDeactivatedAfterEdit() && parameter.stateNames[stateIndex] != stateNameBuffer) {
+                            RenameParameterState(editor, i, stateIndex, stateNameBuffer);
+                        }
+                        if (parameter.stateNames.size() <= 1u) {
+                            ImGui::BeginDisabled();
+                        }
+                        if (ImGui::Button("Delete State")) {
+                            DeleteParameterState(editor, i, stateIndex);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        if (parameter.stateNames.size() <= 1u) {
+                            ImGui::EndDisabled();
+                        }
+                        ImGui::EndPopup();
+                    }
+                    if (stateSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndChild();
+                if (ImGui::Button("Add State +")) {
+                    editor.addParameterStateTarget = i;
+                    std::snprintf(
+                        editor.addParameterStateName,
+                        sizeof(editor.addParameterStateName),
+                        "State %d",
+                        static_cast<int>(parameter.stateNames.size()) + 1
+                    );
+                    ImGui::OpenPopup("Add Parameter State");
+                }
+                if (ImGui::BeginPopupModal("Add Parameter State", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::InputText("Name", editor.addParameterStateName, sizeof(editor.addParameterStateName));
+                    if (ImGui::Button("OK")) {
+                        AddStateToParameter(editor, editor.addParameterStateTarget, editor.addParameterStateName);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            ImGui::SetNextItemWidth(-1.0f);
+            float value = parameter.value;
+            const bool sliderChanged = ImGui::SliderFloat("##value", &value, 0.0f, 1.0f, "%.2f");
+            if (
+                ImGui::IsItemActive() &&
+                ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                editor.selectedParameterSetpointParameter >= 0
+            ) {
+                ClearParameterSetpointSelection(editor);
+            }
+            const bool snappedToSetpoint = DrawParameterSetpointMarkersAndHandleSnap(
+                editor,
+                i,
+                CollectParameterSetpointValues(parameter),
+                value
+            );
+            const bool setpointSelectedForThisParameter =
+                editor.selectedParameterSetpointParameter == i &&
+                ParameterHasSetpointValue(parameter, editor.selectedParameterSetpointValue);
+            if (setpointSelectedForThisParameter) {
+                value = editor.selectedParameterSetpointValue;
+            } else if (editor.selectedParameterSetpointParameter == i) {
+                ClearParameterSetpointSelection(editor);
+            }
+
+            if (sliderChanged || snappedToSetpoint || setpointSelectedForThisParameter) {
+                parameter.value = value;
+                editor.selectedParameter = i;
+                ApplyAllDeformParameters(editor);
+            }
         }
 
         if (selected) {

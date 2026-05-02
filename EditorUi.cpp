@@ -2,6 +2,7 @@
 
 #include "EditorDocument.hpp"
 #include "EditorHistory.hpp"
+#include "EditorSettings.hpp"
 #include "MeshGenerator.hpp"
 
 #include <glad/glad.h>
@@ -12,13 +13,27 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <string>
 #include <unordered_set>
 
 static void UpdateActiveParameterEndpointForLayers(EditorState& editor, const std::vector<int>& layerIndices);
+static void ReconcileParameterMeshesAfterMeshEdit(
+    EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& oldToNewVertex
+);
+static void ReconcileParameterMeshesAfterMeshVertexMove(
+    EditorState& editor,
+    int layerIndex,
+    const LayerMesh& beforeMesh
+);
+static bool ActiveParameterNeedsSetpointSnapBeforeEdit(EditorState& editor);
+static bool ContinueParameterEditSetpointSnap(EditorState& editor);
 
 #include "EditorUiProject.inc"
 #include "EditorUiSelection.inc"

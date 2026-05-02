@@ -44,6 +44,20 @@ static void ClearMeshSelection(EditorState& editor) {
     editor.selectedEdges.clear();
 }
 
+static void ClearParameterSetpointSelection(EditorState& editor) {
+    editor.selectedParameterSetpointParameter = -1;
+    editor.selectedParameterSetpointValue = -1.0f;
+    editor.draggingParameterSetpoint = false;
+    editor.pendingParameterSetpointDrag = false;
+    editor.parameterSetpointDragStartMouseX = 0.0f;
+    editor.parameterSetpointDragStartValue = 0.0f;
+    editor.parameterSetpointDragStartTime = 0.0;
+    editor.parameterEditSnapActive = false;
+    editor.parameterEditSnapTarget = 0.0f;
+    editor.parameterSetpointDragBefore.clear();
+    editor.parameterSetpointDragSelectedBefore = -1;
+}
+
 static void ClearDeformVertexSelection(EditorState& editor) {
     editor.selectedDeformVertices.clear();
 }
@@ -85,10 +99,7 @@ static void RemoveLayerFromSelection(EditorState& editor, int layerIndex) {
 }
 
 static void SelectSingleLayer(EditorState& editor, int layerIndex) {
-    if (IsValidLayerIndex(editor, layerIndex) && !editor.document.layers[layerIndex].visible) {
-        layerIndex = -1;
-    }
-
+    ClearParameterSetpointSelection(editor);
     editor.selectedLayer = layerIndex;
     editor.selectedLayers.clear();
     if (layerIndex >= 0) {
@@ -98,12 +109,10 @@ static void SelectSingleLayer(EditorState& editor, int layerIndex) {
 }
 
 static void SelectAllLayers(EditorState& editor) {
+    ClearParameterSetpointSelection(editor);
     editor.selectedLayers.clear();
     editor.selectedLayers.reserve(editor.document.layers.size());
     for (int i = 0; i < static_cast<int>(editor.document.layers.size()); ++i) {
-        if (!editor.document.layers[i].visible) {
-            continue;
-        }
         editor.selectedLayers.push_back(i);
     }
     editor.selectedLayer = editor.document.layers.empty() ? -1 : 0;
@@ -116,10 +125,11 @@ static void SelectAllLayers(EditorState& editor) {
 }
 
 static void ToggleLayerSelection(EditorState& editor, int layerIndex) {
-    if (!IsValidLayerIndex(editor, layerIndex) || !editor.document.layers[layerIndex].visible) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
         return;
     }
 
+    ClearParameterSetpointSelection(editor);
     auto it = std::find(editor.selectedLayers.begin(), editor.selectedLayers.end(), layerIndex);
     if (it == editor.selectedLayers.end()) {
         editor.selectedLayers.push_back(layerIndex);
@@ -135,10 +145,11 @@ static void ToggleLayerSelection(EditorState& editor, int layerIndex) {
 }
 
 static void SelectLayerRange(EditorState& editor, int layerIndex) {
-    if (!IsValidLayerIndex(editor, layerIndex) || !editor.document.layers[layerIndex].visible) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
         return;
     }
 
+    ClearParameterSetpointSelection(editor);
     const int anchor = IsValidLayerIndex(editor, editor.selectedLayer)
         ? editor.selectedLayer
         : layerIndex;
@@ -147,9 +158,6 @@ static void SelectLayerRange(EditorState& editor, int layerIndex) {
 
     editor.selectedLayers.clear();
     for (int i = first; i <= last; ++i) {
-        if (!editor.document.layers[i].visible) {
-            continue;
-        }
         editor.selectedLayers.push_back(i);
     }
 
@@ -383,6 +391,10 @@ static float TransformBoxPadding(float zoom) {
     return std::max(14.0f / std::max(zoom, 0.0001f), 6.0f);
 }
 
+static float ScreenPixelsToCanvas(float pixels, float zoom) {
+    return pixels / std::max(zoom, 0.0001f);
+}
+
 static void PadBounds(float& x0, float& y0, float& x1, float& y1, float zoom) {
     const float padding = TransformBoxPadding(zoom);
     x0 -= padding;
@@ -544,12 +556,15 @@ static bool PickBoundsTransformHandle(
     axisX = 0;
     axisY = 0;
 
-    const float edgeRadius = std::max(8.0f / std::max(zoom, 0.0001f), 3.0f);
-    const float cornerScaleRadius = std::max(10.0f / std::max(zoom, 0.0001f), 4.0f);
-    const float rotateRadius = std::max(22.0f / std::max(zoom, 0.0001f), 8.0f);
-    const float centerRadius = std::max(18.0f / std::max(zoom, 0.0001f), 8.0f);
+    const float edgeHandleHalfSize = ScreenPixelsToCanvas(7.0f, zoom);
+    const float cornerScaleRadius = ScreenPixelsToCanvas(13.0f, zoom);
+    const float rotateInnerRadius = ScreenPixelsToCanvas(14.0f, zoom);
+    const float rotateOuterRadius = ScreenPixelsToCanvas(24.0f, zoom);
+    const float centerRadius = ScreenPixelsToCanvas(10.0f, zoom);
+    const float edgeHandleHalfSizeSq = edgeHandleHalfSize * edgeHandleHalfSize;
     const float cornerScaleRadiusSq = cornerScaleRadius * cornerScaleRadius;
-    const float rotateRadiusSq = rotateRadius * rotateRadius;
+    const float rotateInnerRadiusSq = rotateInnerRadius * rotateInnerRadius;
+    const float rotateOuterRadiusSq = rotateOuterRadius * rotateOuterRadius;
     const float centerRadiusSq = centerRadius * centerRadius;
     const bool insideBounds = CanvasPointInBox(point, Vec2{x0, y0}, Vec2{x1, y1});
 
@@ -586,38 +601,37 @@ static bool PickBoundsTransformHandle(
 
         if (
             !insideBounds &&
-            distanceSq > cornerScaleRadiusSq &&
-            distanceSq <= rotateRadiusSq
+            distanceSq >= rotateInnerRadiusSq &&
+            distanceSq <= rotateOuterRadiusSq
         ) {
             mode = LayerTransformMode::Rotate;
             return true;
         }
     }
 
-    if (point.y >= y0 - edgeRadius && point.y <= y1 + edgeRadius) {
-        if (std::abs(point.x - x0) <= edgeRadius) {
-            mode = LayerTransformMode::Scale;
-            axisX = -1;
-            return true;
-        }
+    struct EdgeHandle {
+        Vec2 point;
+        int axisX;
+        int axisY;
+    };
 
-        if (std::abs(point.x - x1) <= edgeRadius) {
-            mode = LayerTransformMode::Scale;
-            axisX = 1;
-            return true;
-        }
-    }
+    const EdgeHandle edgeHandles[] = {
+        {Vec2{(x0 + x1) * 0.5f, y0}, 0, -1},
+        {Vec2{x1, (y0 + y1) * 0.5f}, 1, 0},
+        {Vec2{(x0 + x1) * 0.5f, y1}, 0, 1},
+        {Vec2{x0, (y0 + y1) * 0.5f}, -1, 0},
+    };
 
-    if (point.x >= x0 - edgeRadius && point.x <= x1 + edgeRadius) {
-        if (std::abs(point.y - y0) <= edgeRadius) {
+    for (const EdgeHandle& edgeHandle : edgeHandles) {
+        const Vec2 delta = point - edgeHandle.point;
+        if (
+            std::abs(delta.x) <= edgeHandleHalfSize &&
+            std::abs(delta.y) <= edgeHandleHalfSize &&
+            Dot(delta, delta) <= edgeHandleHalfSizeSq * 2.0f
+        ) {
             mode = LayerTransformMode::Scale;
-            axisY = -1;
-            return true;
-        }
-
-        if (std::abs(point.y - y1) <= edgeRadius) {
-            mode = LayerTransformMode::Scale;
-            axisY = 1;
+            axisX = edgeHandle.axisX;
+            axisY = edgeHandle.axisY;
             return true;
         }
     }
@@ -913,6 +927,35 @@ static void PushMeshEditOperation(
     );
 }
 
+static void PushMeshEditOperationWithParameters(
+    EditorState& editor,
+    const LayerHistoryState& before,
+    const std::vector<DeformParameter>& parametersBefore,
+    const std::string& description
+) {
+    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+        return;
+    }
+
+    PushLayerOperationWithParameters(
+        editor,
+        editor.selectedLayer,
+        before,
+        CaptureLayerHistoryState(editor.document.layers[editor.selectedLayer]),
+        parametersBefore,
+        editor.parameters,
+        description
+    );
+}
+
+static std::vector<int> MakeIdentityVertexRemap(std::size_t vertexCount) {
+    std::vector<int> oldToNew(vertexCount, -1);
+    for (std::size_t i = 0; i < vertexCount; ++i) {
+        oldToNew[i] = static_cast<int>(i);
+    }
+    return oldToNew;
+}
+
 static void AddVertexAtCanvasPoint(EditorState& editor, Vec2 canvasPoint, bool connectToSelection) {
     if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
         return;
@@ -920,6 +963,8 @@ static void AddVertexAtCanvasPoint(EditorState& editor, Vec2 canvasPoint, bool c
 
     EditorLayer& layer = editor.document.layers[editor.selectedLayer];
     const LayerHistoryState before = CaptureLayerHistoryState(layer);
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+    const std::vector<int> oldToNewVertex = MakeIdentityVertexRemap(layer.mesh.vertices.size());
     const int previousVertex = HasSelectedVertex(editor)
         ? static_cast<int>(ActiveSelectedVertex(editor))
         : -1;
@@ -937,9 +982,10 @@ static void AddVertexAtCanvasPoint(EditorState& editor, Vec2 canvasPoint, bool c
     }
 
     UpdateLayerBoundsFromMesh(layer);
+    ReconcileParameterMeshesAfterMeshEdit(editor, editor.selectedLayer, oldToNewVertex);
     ClearMeshSelection(editor);
     editor.selectedVertices.push_back(newVertex);
-    PushMeshEditOperation(editor, before, "Add mesh vertex");
+    PushMeshEditOperationWithParameters(editor, before, parametersBefore, "Add mesh vertex");
 }
 
 static void DeleteSelectedMeshItems(EditorState& editor) {
@@ -949,6 +995,7 @@ static void DeleteSelectedMeshItems(EditorState& editor) {
 
     EditorLayer& layer = editor.document.layers[editor.selectedLayer];
     const LayerHistoryState before = CaptureLayerHistoryState(layer);
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
 
     if (!editor.selectedVertices.empty()) {
         std::vector<std::uint8_t> removeVertex(layer.mesh.vertices.size(), 0u);
@@ -959,6 +1006,7 @@ static void DeleteSelectedMeshItems(EditorState& editor) {
         }
 
         std::vector<std::uint32_t> remap(layer.mesh.vertices.size(), 0u);
+        std::vector<int> oldToNewVertex(layer.mesh.vertices.size(), -1);
         std::vector<MeshVertex> keptVertices;
         keptVertices.reserve(layer.mesh.vertices.size());
 
@@ -968,6 +1016,7 @@ static void DeleteSelectedMeshItems(EditorState& editor) {
             }
 
             remap[i] = static_cast<std::uint32_t>(keptVertices.size());
+            oldToNewVertex[i] = static_cast<int>(keptVertices.size());
             keptVertices.push_back(layer.mesh.vertices[i]);
         }
 
@@ -989,7 +1038,9 @@ static void DeleteSelectedMeshItems(EditorState& editor) {
         layer.mesh.vertices = std::move(keptVertices);
         layer.mesh.edges = std::move(keptEdges);
         RebuildMeshTrianglesFromEdges(layer.mesh);
+        ReconcileParameterMeshesAfterMeshEdit(editor, editor.selectedLayer, oldToNewVertex);
     } else if (!editor.selectedEdges.empty()) {
+        const std::vector<int> oldToNewVertex = MakeIdentityVertexRemap(layer.mesh.vertices.size());
         std::vector<std::uint8_t> removeEdge(layer.mesh.edges.size(), 0u);
         for (const std::uint32_t edge : editor.selectedEdges) {
             if (edge < removeEdge.size()) {
@@ -1007,9 +1058,10 @@ static void DeleteSelectedMeshItems(EditorState& editor) {
 
         layer.mesh.edges = std::move(keptEdges);
         RebuildMeshTrianglesFromEdges(layer.mesh);
+        ReconcileParameterMeshesAfterMeshEdit(editor, editor.selectedLayer, oldToNewVertex);
     }
 
     ClearMeshSelection(editor);
     UpdateLayerBoundsFromMesh(layer);
-    PushMeshEditOperation(editor, before, "Delete mesh selection");
+    PushMeshEditOperationWithParameters(editor, before, parametersBefore, "Delete mesh selection");
 }

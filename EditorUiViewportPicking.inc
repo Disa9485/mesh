@@ -73,6 +73,7 @@ static bool LayerAlphaHitTest(
 ) {
     if (
         !layer.visible ||
+        layer.opacity <= 0.001f ||
         layer.alpha.empty() ||
         layer.width <= 0 ||
         layer.height <= 0
@@ -185,4 +186,3 @@ static bool PickVertexInSelectedLayers(
 
     return false;
 }
-

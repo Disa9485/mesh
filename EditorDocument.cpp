@@ -82,27 +82,27 @@ static std::vector<std::uint8_t> ExtractAlphaChannel(
     return alpha;
 }
 
-static void ComputeLayerPreviewUvs(EditorLayer& layer) {
-    if (layer.width <= 0 || layer.height <= 0 || layer.alpha.empty()) {
-        layer.previewU0 = 0.0f;
-        layer.previewV0 = 0.0f;
-        layer.previewU1 = 1.0f;
-        layer.previewV1 = 1.0f;
+static void ComputeTexturePreviewUvs(EditorTexture& texture) {
+    if (texture.width <= 0 || texture.height <= 0 || texture.alpha.empty()) {
+        texture.previewU0 = 0.0f;
+        texture.previewV0 = 0.0f;
+        texture.previewU1 = 1.0f;
+        texture.previewV1 = 1.0f;
         return;
     }
 
-    int minX = layer.width;
-    int minY = layer.height;
+    int minX = texture.width;
+    int minY = texture.height;
     int maxX = -1;
     int maxY = -1;
 
-    for (int y = 0; y < layer.height; ++y) {
-        for (int x = 0; x < layer.width; ++x) {
+    for (int y = 0; y < texture.height; ++y) {
+        for (int x = 0; x < texture.width; ++x) {
             const std::size_t index =
-                static_cast<std::size_t>(y) * static_cast<std::size_t>(layer.width) +
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width) +
                 static_cast<std::size_t>(x);
 
-            if (index >= layer.alpha.size() || layer.alpha[index] <= kOpaquePixelAlphaThreshold) {
+            if (index >= texture.alpha.size() || texture.alpha[index] <= kOpaquePixelAlphaThreshold) {
                 continue;
             }
 
@@ -114,10 +114,10 @@ static void ComputeLayerPreviewUvs(EditorLayer& layer) {
     }
 
     if (maxX < minX || maxY < minY) {
-        layer.previewU0 = 0.0f;
-        layer.previewV0 = 0.0f;
-        layer.previewU1 = 1.0f;
-        layer.previewV1 = 1.0f;
+        texture.previewU0 = 0.0f;
+        texture.previewV0 = 0.0f;
+        texture.previewU1 = 1.0f;
+        texture.previewV1 = 1.0f;
         return;
     }
 
@@ -130,17 +130,17 @@ static void ComputeLayerPreviewUvs(EditorLayer& layer) {
     const float side = std::max(cropMaxX - cropMinX, cropMaxY - cropMinY);
     const float halfSide = side * 0.5f;
 
-    const float x0 = std::clamp(centerX - halfSide, 0.0f, static_cast<float>(layer.width));
-    const float y0 = std::clamp(centerY - halfSide, 0.0f, static_cast<float>(layer.height));
-    const float x1 = std::clamp(centerX + halfSide, 0.0f, static_cast<float>(layer.width));
-    const float y1 = std::clamp(centerY + halfSide, 0.0f, static_cast<float>(layer.height));
+    const float x0 = std::clamp(centerX - halfSide, 0.0f, static_cast<float>(texture.width));
+    const float y0 = std::clamp(centerY - halfSide, 0.0f, static_cast<float>(texture.height));
+    const float x1 = std::clamp(centerX + halfSide, 0.0f, static_cast<float>(texture.width));
+    const float y1 = std::clamp(centerY + halfSide, 0.0f, static_cast<float>(texture.height));
 
-    const float invW = 1.0f / static_cast<float>(std::max(1, layer.width));
-    const float invH = 1.0f / static_cast<float>(std::max(1, layer.height));
-    layer.previewU0 = x0 * invW;
-    layer.previewV0 = y0 * invH;
-    layer.previewU1 = x1 * invW;
-    layer.previewV1 = y1 * invH;
+    const float invW = 1.0f / static_cast<float>(std::max(1, texture.width));
+    const float invH = 1.0f / static_cast<float>(std::max(1, texture.height));
+    texture.previewU0 = x0 * invW;
+    texture.previewV0 = y0 * invH;
+    texture.previewU1 = x1 * invW;
+    texture.previewV1 = y1 * invH;
 }
 
 static GLuint UploadTextureRGBA(const std::uint8_t* rgba, int w, int h) {
@@ -194,14 +194,150 @@ static void UpdateTextureRGBA(GLuint texture, const std::uint8_t* rgba, int w, i
 }
 
 void DestroyDocument(EditorDocument& doc) {
-    for (EditorLayer& layer : doc.layers) {
-        if (layer.texture) {
-            glDeleteTextures(1, &layer.texture);
-            layer.texture = 0;
+    for (EditorTexture& texture : doc.textures) {
+        if (texture.texture) {
+            glDeleteTextures(1, &texture.texture);
+            texture.texture = 0;
         }
     }
 
     doc = EditorDocument{};
+}
+
+static void DestroyDocumentTextures(EditorDocument& doc) {
+    for (EditorTexture& texture : doc.textures) {
+        if (texture.texture) {
+            glDeleteTextures(1, &texture.texture);
+            texture.texture = 0;
+        }
+    }
+    doc.textures.clear();
+}
+
+static bool LoadPsdTextures(
+    const std::string& path,
+    EditorDocument& document,
+    std::string& error
+) {
+    PsdDocumentRGBA psd;
+    if (!PsdLoader::LoadPsd(path, psd, error)) {
+        return false;
+    }
+
+    std::reverse(psd.layers.begin(), psd.layers.end());
+    DestroyDocumentTextures(document);
+
+    document.psdPath = path;
+    document.canvasWidth = psd.canvasWidth;
+    document.canvasHeight = psd.canvasHeight;
+    document.textures.reserve(psd.layers.size());
+
+    for (const LayerImageRGBA& src : psd.layers) {
+        EditorTexture texture;
+        texture.name = src.name;
+        texture.left = src.left;
+        texture.top = src.top;
+        texture.right = src.right;
+        texture.bottom = src.bottom;
+        texture.width = src.width;
+        texture.height = src.height;
+        texture.alpha = ExtractAlphaChannel(src.rgba, src.width, src.height);
+        std::vector<std::uint8_t> premultipliedRgba = src.rgba;
+        PremultiplyAlpha(premultipliedRgba);
+        texture.baseRgba = premultipliedRgba;
+        texture.renderedRgba = premultipliedRgba;
+        texture.texture = UploadTextureRGBA(premultipliedRgba.data(), src.width, src.height);
+        ComputeTexturePreviewUvs(texture);
+        document.textures.push_back(std::move(texture));
+    }
+
+    return true;
+}
+
+static EditorLayer CreateLayerForTexture(const EditorTexture& texture, int textureIndex) {
+    EditorLayer layer;
+    layer.name = texture.name;
+    layer.left = texture.left;
+    layer.top = texture.top;
+    layer.right = texture.right;
+    layer.bottom = texture.bottom;
+    layer.visible = true;
+    return layer;
+}
+
+static LayerMesh CreateInitialQuadMeshForEditorTexture(const EditorTexture& texture) {
+    LayerMesh mesh;
+    if (texture.width <= 0 || texture.height <= 0 || texture.alpha.empty()) {
+        return mesh;
+    }
+
+    int minX = texture.width;
+    int minY = texture.height;
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < texture.height; ++y) {
+        for (int x = 0; x < texture.width; ++x) {
+            const std::size_t index =
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width) +
+                static_cast<std::size_t>(x);
+            if (index < texture.alpha.size() && texture.alpha[index] > kOpaquePixelAlphaThreshold) {
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) {
+        return mesh;
+    }
+
+    const float x0 = static_cast<float>(minX);
+    const float y0 = static_cast<float>(minY);
+    const float x1 = static_cast<float>(maxX + 1);
+    const float y1 = static_cast<float>(maxY + 1);
+    const float w = static_cast<float>(std::max(1, texture.width));
+    const float h = static_cast<float>(std::max(1, texture.height));
+    mesh.vertices = {
+        {{x0, y0}, {x0 / w, y0 / h}},
+        {{x1, y0}, {x1 / w, y0 / h}},
+        {{x1, y1}, {x1 / w, y1 / h}},
+        {{x0, y1}, {x0 / w, y1 / h}},
+    };
+    mesh.indices = {0, 1, 2, 0, 2, 3};
+    mesh.edges = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 2}};
+    return mesh;
+}
+
+void ApplyTextureToLayer(EditorDocument& document, EditorLayer& layer, int textureIndex) {
+    if (textureIndex < 0 || textureIndex >= static_cast<int>(document.textures.size())) {
+        layer.textureIndex = -1;
+        layer.width = 0;
+        layer.height = 0;
+        layer.texture = 0;
+        layer.previewU0 = 0.0f;
+        layer.previewV0 = 0.0f;
+        layer.previewU1 = 1.0f;
+        layer.previewV1 = 1.0f;
+        layer.alpha.clear();
+        layer.baseRgba.clear();
+        layer.renderedRgba.clear();
+        return;
+    }
+
+    const EditorTexture& texture = document.textures[textureIndex];
+    layer.textureIndex = textureIndex;
+    layer.width = texture.width;
+    layer.height = texture.height;
+    layer.texture = texture.texture;
+    layer.previewU0 = texture.previewU0;
+    layer.previewV0 = texture.previewV0;
+    layer.previewU1 = texture.previewU1;
+    layer.previewV1 = texture.previewV1;
+    layer.alpha = texture.alpha;
+    layer.baseRgba = texture.baseRgba;
+    layer.renderedRgba = texture.renderedRgba;
 }
 
 static std::uint8_t LayerMaskAlphaAtCanvasPoint(
@@ -550,6 +686,10 @@ static std::filesystem::path GetBinaryMeshSidecarPath(const std::string& psdPath
     std::filesystem::path path(psdPath);
     path.replace_extension(".mesh.bin");
     return path;
+}
+
+static std::filesystem::path GetDefaultProjectPathForPsd(const std::string& psdPath) {
+    return GetBinaryMeshSidecarPath(psdPath);
 }
 
 template <typename T>
@@ -996,14 +1136,41 @@ static bool WriteBinaryLayerHistoryState(std::ostream& out, const LayerHistorySt
 
     return
         WriteBinaryString(out, state.renderOrderOverride) &&
+        WriteBinaryValue(out, state.textureIndex) &&
         WriteBinaryMesh(out, state.mesh);
+}
+
+static bool WriteBinaryLayerListHistoryState(
+    std::ostream& out,
+    const std::vector<LayerListHistoryState>& layers
+) {
+    if (layers.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        return false;
+    }
+
+    const std::uint32_t layerCount = static_cast<std::uint32_t>(layers.size());
+    if (!WriteBinaryValue(out, layerCount)) {
+        return false;
+    }
+
+    for (const LayerListHistoryState& layer : layers) {
+        if (
+            !WriteBinaryString(out, layer.name) ||
+            !WriteBinaryLayerHistoryState(out, layer.state)
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool ReadBinaryLayerHistoryState(
     std::istream& in,
     LayerHistoryState& state,
     bool hasLayerMetadata,
-    bool hasRenderOrderOverrideMetadata
+    bool hasRenderOrderOverrideMetadata,
+    bool hasLayerTextureIndex
 ) {
     LayerHistoryState parsed;
     std::uint8_t visible = 1u;
@@ -1040,6 +1207,10 @@ static bool ReadBinaryLayerHistoryState(
         return false;
     }
 
+    if (hasLayerTextureIndex && !ReadBinaryValue(in, parsed.textureIndex)) {
+        return false;
+    }
+
     if (!ReadBinaryMesh(in, parsed.mesh)) {
         return false;
     }
@@ -1048,6 +1219,42 @@ static bool ReadBinaryLayerHistoryState(
     state = std::move(parsed);
     return true;
 }
+
+static bool ReadBinaryLayerListHistoryState(
+    std::istream& in,
+    std::vector<LayerListHistoryState>& layers,
+    bool hasLayerMetadata,
+    bool hasRenderOrderOverrideMetadata,
+    bool hasLayerTextureIndex
+) {
+    std::uint32_t layerCount = 0;
+    if (!ReadBinaryValue(in, layerCount) || layerCount > 100'000u) {
+        return false;
+    }
+
+    layers.clear();
+    layers.reserve(layerCount);
+    for (std::uint32_t i = 0; i < layerCount; ++i) {
+        LayerListHistoryState layer;
+        if (
+            !ReadBinaryString(in, layer.name) ||
+            !ReadBinaryLayerHistoryState(
+                in,
+                layer.state,
+                hasLayerMetadata,
+                hasRenderOrderOverrideMetadata,
+                hasLayerTextureIndex
+            )
+        ) {
+            return false;
+        }
+        layers.push_back(std::move(layer));
+    }
+
+    return true;
+}
+
+static int FindTextureIndexByName(const EditorDocument& document, const std::string& name);
 
 static bool WriteBinaryParameterList(
     std::ostream& out,
@@ -1071,15 +1278,38 @@ static bool WriteBinaryParameterList(
             return false;
         }
 
+        const std::uint8_t parameterType = parameter.type == DeformParameterType::State ? 1u : 0u;
+        if (
+            !WriteBinaryValue(out, parameterType) ||
+            !WriteBinaryValue(out, parameter.selectedState)
+        ) {
+            return false;
+        }
+
+        if (parameter.stateNames.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+            return false;
+        }
+        const std::uint32_t stateNameCount = static_cast<std::uint32_t>(parameter.stateNames.size());
+        if (!WriteBinaryValue(out, stateNameCount)) {
+            return false;
+        }
+        for (const std::string& stateName : parameter.stateNames) {
+            if (!WriteBinaryString(out, stateName)) {
+                return false;
+            }
+        }
+
         const std::uint8_t affectsMesh = parameter.affectsMesh ? 1u : 0u;
         const std::uint8_t affectsRenderOrder = parameter.affectsRenderOrder ? 1u : 0u;
         const std::uint8_t affectsMasking = parameter.affectsMasking ? 1u : 0u;
         const std::uint8_t affectsOpacity = parameter.affectsOpacity ? 1u : 0u;
+        const std::uint8_t affectsTexture = parameter.affectsTexture ? 1u : 0u;
         if (
             !WriteBinaryValue(out, affectsMesh) ||
             !WriteBinaryValue(out, affectsRenderOrder) ||
             !WriteBinaryValue(out, affectsMasking) ||
-            !WriteBinaryValue(out, affectsOpacity)
+            !WriteBinaryValue(out, affectsOpacity) ||
+            !WriteBinaryValue(out, affectsTexture)
         ) {
             return false;
         }
@@ -1098,12 +1328,21 @@ static bool WriteBinaryParameterList(
             if (state.layerIndex >= 0 && state.layerIndex < static_cast<int>(editor.document.layers.size())) {
                 layerName = editor.document.layers[state.layerIndex].name;
             }
+            const auto textureNameForIndex = [&](int textureIndex) -> std::string {
+                return textureIndex >= 0 && textureIndex < static_cast<int>(editor.document.textures.size())
+                    ? editor.document.textures[textureIndex].name
+                    : std::string{};
+            };
 
             if (
                 !WriteBinaryValue(out, state.layerIndex) ||
                 !WriteBinaryString(out, layerName) ||
                 !WriteBinaryMesh(out, state.meshAt0) ||
-                !WriteBinaryMesh(out, state.meshAt1)
+                !WriteBinaryMesh(out, state.meshAt1) ||
+                !WriteBinaryValue(out, state.textureIndexAt0) ||
+                !WriteBinaryString(out, textureNameForIndex(state.textureIndexAt0)) ||
+                !WriteBinaryValue(out, state.textureIndexAt1) ||
+                !WriteBinaryString(out, textureNameForIndex(state.textureIndexAt1))
             ) {
                 return false;
             }
@@ -1195,6 +1434,8 @@ static bool WriteBinaryParameterList(
                     setpoint.maskLayerIndices.size() > (std::numeric_limits<std::uint32_t>::max)() ||
                     !WriteBinaryValue(out, setpoint.value) ||
                     !WriteBinaryMesh(out, setpoint.mesh) ||
+                    !WriteBinaryValue(out, setpoint.textureIndex) ||
+                    !WriteBinaryString(out, textureNameForIndex(setpoint.textureIndex)) ||
                     !WriteBinaryValue(out, setpoint.opacity) ||
                     !WriteBinaryString(out, setpoint.renderOrderOverride)
                 ) {
@@ -1225,7 +1466,9 @@ static bool ReadBinaryParameterList(
     bool hasMaskSetpoints,
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
-    bool hasParameterSetpoints
+    bool hasParameterSetpoints,
+    bool hasParameterTypes,
+    bool hasParameterTextures
 ) {
     parameters.clear();
 
@@ -1256,11 +1499,48 @@ static bool ReadBinaryParameterList(
         }
 
         parameter.value = std::clamp(parameter.value, 0.0f, 1.0f);
+        if (hasParameterTypes) {
+            std::uint8_t parameterType = 0u;
+            int selectedState = 0;
+            std::uint32_t stateNameCount = 0;
+            if (
+                !ReadBinaryValue(in, parameterType) ||
+                !ReadBinaryValue(in, selectedState) ||
+                !ReadBinaryValue(in, stateNameCount) ||
+                stateNameCount > 10'000u
+            ) {
+                return false;
+            }
+
+            parameter.type = parameterType ? DeformParameterType::State : DeformParameterType::Slider;
+            parameter.selectedState = selectedState;
+            parameter.stateNames.clear();
+            parameter.stateNames.reserve(stateNameCount);
+            for (std::uint32_t stateNameIndex = 0; stateNameIndex < stateNameCount; ++stateNameIndex) {
+                std::string stateName;
+                if (!ReadBinaryString(in, stateName)) {
+                    return false;
+                }
+                parameter.stateNames.push_back(std::move(stateName));
+            }
+            if (parameter.type == DeformParameterType::State) {
+                if (parameter.stateNames.empty()) {
+                    parameter.stateNames.push_back("Default");
+                }
+                parameter.selectedState = std::clamp(
+                    parameter.selectedState,
+                    0,
+                    static_cast<int>(parameter.stateNames.size()) - 1
+                );
+                parameter.value = static_cast<float>(parameter.selectedState);
+            }
+        }
         if (hasParameterChannels) {
             std::uint8_t affectsMesh = 1u;
             std::uint8_t affectsRenderOrder = 1u;
             std::uint8_t affectsMasking = 1u;
             std::uint8_t affectsOpacity = 1u;
+            std::uint8_t affectsTexture = 0u;
             if (
                 !ReadBinaryValue(in, affectsMesh) ||
                 !ReadBinaryValue(in, affectsRenderOrder) ||
@@ -1269,10 +1549,14 @@ static bool ReadBinaryParameterList(
             ) {
                 return false;
             }
+            if (hasParameterTextures && !ReadBinaryValue(in, affectsTexture)) {
+                return false;
+            }
             parameter.affectsMesh = affectsMesh != 0u;
             parameter.affectsRenderOrder = affectsRenderOrder != 0u;
             parameter.affectsMasking = affectsMasking != 0u;
             parameter.affectsOpacity = affectsOpacity != 0u;
+            parameter.affectsTexture = affectsTexture != 0u;
         }
 
         if (!ReadBinaryValue(in, layerCount)) {
@@ -1287,6 +1571,10 @@ static bool ReadBinaryParameterList(
             std::string savedName;
             LayerMesh meshAt0;
             LayerMesh meshAt1;
+            int textureIndexAt0 = -1;
+            int textureIndexAt1 = -1;
+            std::string textureNameAt0;
+            std::string textureNameAt1;
             std::vector<DeformParameterMeshCorner> meshCorners;
             std::vector<DeformParameterLayerSetpoint> setpoints;
             float opacityAt0 = 1.0f;
@@ -1303,6 +1591,22 @@ static bool ReadBinaryParameterList(
                 !ReadBinaryMesh(in, meshAt1)
             ) {
                 return false;
+            }
+            if (hasParameterTextures) {
+                if (
+                    !ReadBinaryValue(in, textureIndexAt0) ||
+                    !ReadBinaryString(in, textureNameAt0) ||
+                    !ReadBinaryValue(in, textureIndexAt1) ||
+                    !ReadBinaryString(in, textureNameAt1)
+                ) {
+                    return false;
+                }
+                if (!textureNameAt0.empty()) {
+                    textureIndexAt0 = FindTextureIndexByName(editor.document, textureNameAt0);
+                }
+                if (!textureNameAt1.empty()) {
+                    textureIndexAt1 = FindTextureIndexByName(editor.document, textureNameAt1);
+                }
             }
 
             if (hasParameterMeshCorners) {
@@ -1391,16 +1695,24 @@ static bool ReadBinaryParameterList(
                 setpoints.reserve(setpointCount);
                 for (std::uint32_t setpointIndex = 0; setpointIndex < setpointCount; ++setpointIndex) {
                     DeformParameterLayerSetpoint setpoint;
+                    std::string setpointTextureName;
                     if (
                         !ReadBinaryValue(in, setpoint.value) ||
                         !ReadBinaryMesh(in, setpoint.mesh) ||
+                        (hasParameterTextures && !ReadBinaryValue(in, setpoint.textureIndex)) ||
+                        (hasParameterTextures && !ReadBinaryString(in, setpointTextureName)) ||
                         !ReadBinaryValue(in, setpoint.opacity) ||
                         !ReadBinaryString(in, setpoint.renderOrderOverride)
                     ) {
                         return false;
                     }
+                    if (hasParameterTextures && !setpointTextureName.empty()) {
+                        setpoint.textureIndex = FindTextureIndexByName(editor.document, setpointTextureName);
+                    }
 
-                    setpoint.value = std::clamp(setpoint.value, 0.0f, 1.0f);
+                    if (parameter.type != DeformParameterType::State) {
+                        setpoint.value = std::clamp(setpoint.value, 0.0f, 1.0f);
+                    }
                     setpoint.opacity = std::clamp(setpoint.opacity, 0.0f, 1.0f);
 
                     std::uint32_t setpointMaskCount = 0;
@@ -1426,6 +1738,15 @@ static bool ReadBinaryParameterList(
             state.layerIndex = targetIndex;
             state.meshAt0 = std::move(meshAt0);
             state.meshAt1 = std::move(meshAt1);
+            if (!hasParameterTextures) {
+                textureIndexAt0 = editor.document.layers[targetIndex].textureIndex;
+                textureIndexAt1 = editor.document.layers[targetIndex].textureIndex;
+                for (DeformParameterLayerSetpoint& setpoint : setpoints) {
+                    setpoint.textureIndex = editor.document.layers[targetIndex].textureIndex;
+                }
+            }
+            state.textureIndexAt0 = textureIndexAt0;
+            state.textureIndexAt1 = textureIndexAt1;
             state.meshCorners = std::move(meshCorners);
             state.setpoints = std::move(setpoints);
             if (hasLayerVisualSetpoints) {
@@ -1454,6 +1775,7 @@ static bool ReadBinaryParameterList(
                 DeformParameterLayerSetpoint zero;
                 zero.value = 0.0f;
                 zero.mesh = state.meshAt0;
+                zero.textureIndex = state.textureIndexAt0;
                 zero.opacity = state.opacityAt0;
                 zero.renderOrderOverride = state.renderOrderOverrideAt0;
                 zero.maskLayerIndices = state.maskLayerIndicesAt0;
@@ -1462,6 +1784,7 @@ static bool ReadBinaryParameterList(
                 DeformParameterLayerSetpoint one;
                 one.value = 1.0f;
                 one.mesh = state.meshAt1;
+                one.textureIndex = state.textureIndexAt1;
                 one.opacity = state.opacityAt1;
                 one.renderOrderOverride = state.renderOrderOverrideAt1;
                 one.maskLayerIndices = state.maskLayerIndicesAt1;
@@ -1492,6 +1815,7 @@ static bool WriteBinaryLayerOperation(
     }
 
     const std::uint8_t hasParameterSnapshot = operation.hasParameterSnapshot ? 1u : 0u;
+    const std::uint8_t hasLayerListSnapshot = operation.hasLayerListSnapshot ? 1u : 0u;
     if (!(
         WriteBinaryValue(out, operation.layerIndex) &&
         WriteBinaryString(out, layerName) &&
@@ -1505,9 +1829,19 @@ static bool WriteBinaryLayerOperation(
 
     if (
         !WriteBinaryValue(out, operation.selectedParameterBefore) ||
-        !WriteBinaryValue(out, operation.selectedParameterAfter)
+        !WriteBinaryValue(out, operation.selectedParameterAfter) ||
+        !WriteBinaryValue(out, hasLayerListSnapshot)
     ) {
         return false;
+    }
+
+    if (operation.hasLayerListSnapshot) {
+        if (
+            !WriteBinaryLayerListHistoryState(out, operation.layersBefore) ||
+            !WriteBinaryLayerListHistoryState(out, operation.layersAfter)
+        ) {
+            return false;
+        }
     }
 
     if (!operation.hasParameterSnapshot) {
@@ -1530,7 +1864,10 @@ static bool ReadBinaryLayerOperation(
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
     bool hasParameterSetpoints,
-    bool hasParameterSnapshots
+    bool hasLayerTextureIndex,
+    bool hasParameterSnapshots,
+    bool hasParameterTypes,
+    bool hasParameterTextures
 ) {
     int savedIndex = -1;
     std::string savedName;
@@ -1557,8 +1894,8 @@ static bool ReadBinaryLayerOperation(
     parsed.description = std::move(description);
 
     if (
-        !ReadBinaryLayerHistoryState(in, parsed.before, hasLayerMetadata, hasRenderOrderOverrideMetadata) ||
-        !ReadBinaryLayerHistoryState(in, parsed.after, hasLayerMetadata, hasRenderOrderOverrideMetadata)
+        !ReadBinaryLayerHistoryState(in, parsed.before, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex) ||
+        !ReadBinaryLayerHistoryState(in, parsed.after, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex)
     ) {
         return false;
     }
@@ -1578,10 +1915,37 @@ static bool ReadBinaryLayerOperation(
                 return false;
             }
         }
+        if (hasLayerTextureIndex) {
+            std::uint8_t hasLayerListSnapshot = 0u;
+            if (!ReadBinaryValue(in, hasLayerListSnapshot)) {
+                return false;
+            }
+            parsed.hasLayerListSnapshot = hasLayerListSnapshot != 0u;
+            if (parsed.hasLayerListSnapshot) {
+                if (
+                    !ReadBinaryLayerListHistoryState(
+                        in,
+                        parsed.layersBefore,
+                        hasLayerMetadata,
+                        hasRenderOrderOverrideMetadata,
+                        hasLayerTextureIndex
+                    ) ||
+                    !ReadBinaryLayerListHistoryState(
+                        in,
+                        parsed.layersAfter,
+                        hasLayerMetadata,
+                        hasRenderOrderOverrideMetadata,
+                        hasLayerTextureIndex
+                    )
+                ) {
+                    return false;
+                }
+            }
+        }
         if (parsed.hasParameterSnapshot) {
             if (
-                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints) ||
-                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints)
+                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures) ||
+                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures)
             ) {
                 return false;
             }
@@ -1635,7 +1999,10 @@ static bool ReadBinaryHistory(
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
     bool hasParameterSetpoints,
-    bool hasParameterSnapshots
+    bool hasLayerTextureIndex,
+    bool hasParameterSnapshots,
+    bool hasParameterTypes,
+    bool hasParameterTextures
 ) {
     editor.history = EditHistory{};
 
@@ -1662,7 +2029,10 @@ static bool ReadBinaryHistory(
             hasParameterChannels,
             hasParameterMeshCorners,
             hasParameterSetpoints,
-            hasParameterSnapshots
+            hasLayerTextureIndex,
+            hasParameterSnapshots,
+            hasParameterTypes,
+            hasParameterTextures
         )) {
             return false;
         }
@@ -1691,7 +2061,10 @@ static bool ReadBinaryHistory(
             hasParameterChannels,
             hasParameterMeshCorners,
             hasParameterSetpoints,
-            hasParameterSnapshots
+            hasLayerTextureIndex,
+            hasParameterSnapshots,
+            hasParameterTypes,
+            hasParameterTextures
         )) {
             return false;
         }
@@ -1798,7 +2171,7 @@ static std::vector<int> CollectMeshParametersForLayerForSave(
 
     for (int parameterIndex = 0; parameterIndex < static_cast<int>(parameters.size()); ++parameterIndex) {
         const DeformParameter& parameter = parameters[parameterIndex];
-        if (!parameter.affectsMesh || !FindParameterLayerStateForDocument(parameter, layerIndex)) {
+        if (parameter.type == DeformParameterType::State || !parameter.affectsMesh || !FindParameterLayerStateForDocument(parameter, layerIndex)) {
             continue;
         }
 
@@ -1880,6 +2253,54 @@ static std::vector<DeformParameter> CaptureParametersForSave(const EditorState& 
 
     for (int parameterIndex = 0; parameterIndex < static_cast<int>(parameters.size()); ++parameterIndex) {
         DeformParameter& parameter = parameters[parameterIndex];
+        if (parameter.type == DeformParameterType::State) {
+            const float stateValue = static_cast<float>(std::max(0, parameter.selectedState));
+            for (DeformParameterLayerState& state : parameter.layers) {
+                if (
+                    state.layerIndex < 0 ||
+                    state.layerIndex >= static_cast<int>(editor.document.layers.size())
+                ) {
+                    continue;
+                }
+
+                const EditorLayer& layer = editor.document.layers[state.layerIndex];
+                DeformParameterLayerSetpoint* targetSetpoint = nullptr;
+                for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                    if (std::abs(setpoint.value - stateValue) <= 0.001f) {
+                        targetSetpoint = &setpoint;
+                        break;
+                    }
+                }
+                if (!targetSetpoint) {
+                    DeformParameterLayerSetpoint setpoint;
+                    setpoint.value = stateValue;
+                    setpoint.mesh = layer.mesh;
+                    setpoint.textureIndex = layer.textureIndex;
+                    setpoint.opacity = layer.opacity;
+                    setpoint.renderOrderOverride = layer.renderOrderOverride;
+                    setpoint.maskLayerIndices = layer.maskLayerIndices;
+                    state.setpoints.push_back(std::move(setpoint));
+                    targetSetpoint = &state.setpoints.back();
+                }
+                if (parameter.affectsMesh) {
+                    targetSetpoint->mesh = layer.mesh;
+                }
+                if (parameter.affectsOpacity) {
+                    targetSetpoint->opacity = layer.opacity;
+                }
+                if (parameter.affectsRenderOrder) {
+                    targetSetpoint->renderOrderOverride = layer.renderOrderOverride;
+                }
+                if (parameter.affectsMasking) {
+                    targetSetpoint->maskLayerIndices = layer.maskLayerIndices;
+                }
+                if (parameter.affectsTexture) {
+                    targetSetpoint->textureIndex = layer.textureIndex;
+                }
+            }
+            continue;
+        }
+
         const bool updateZero = parameter.value <= 0.001f;
         const bool updateOne = parameter.value >= 0.999f;
         if (!updateZero && !updateOne) {
@@ -1921,6 +2342,9 @@ static std::vector<DeformParameter> CaptureParametersForSave(const EditorState& 
                 if (parameter.affectsMasking) {
                     state.maskLayerIndicesAt0 = layer.maskLayerIndices;
                 }
+                if (parameter.affectsTexture) {
+                    state.textureIndexAt0 = layer.textureIndex;
+                }
             } else if (updateOne) {
                 if (parameter.affectsMesh && !storedMultilinearMeshCorner && MeshTopologyMatchesForDocument(layer.mesh, state.meshAt1)) {
                     state.meshAt1 = MeshWithoutOtherActiveParameterDeltasForSave(
@@ -1945,6 +2369,9 @@ static std::vector<DeformParameter> CaptureParametersForSave(const EditorState& 
                 if (parameter.affectsMasking) {
                     state.maskLayerIndicesAt1 = layer.maskLayerIndices;
                 }
+                if (parameter.affectsTexture) {
+                    state.textureIndexAt1 = layer.textureIndex;
+                }
             }
         }
     }
@@ -1964,11 +2391,13 @@ static bool ReadBinaryParameters(
     bool hasMaskSetpoints,
     bool hasParameterChannels,
     bool hasParameterMeshCorners,
-    bool hasParameterSetpoints
+    bool hasParameterSetpoints,
+    bool hasParameterTypes,
+    bool hasParameterTextures
 ) {
     editor.parameters.clear();
     editor.selectedParameter = -1;
-    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints)) {
+    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures)) {
         return false;
     }
 
@@ -1978,6 +2407,8 @@ static bool ReadBinaryParameters(
 
     return true;
 }
+
+static int FindTextureIndexByName(const EditorDocument& document, const std::string& name);
 
 static void UpdateLayerBoundsFromCurrentMesh(EditorLayer& layer) {
     float x0 = 0.0f;
@@ -2010,7 +2441,7 @@ static void ReconcileLoadedParameterMeshEndpoints(EditorState& editor) {
 
         for (int parameterIndex = 0; parameterIndex < static_cast<int>(editor.parameters.size()); ++parameterIndex) {
             const DeformParameter& parameter = editor.parameters[parameterIndex];
-            if (!parameter.affectsMesh) {
+            if (parameter.type == DeformParameterType::State || !parameter.affectsMesh) {
                 continue;
             }
 
@@ -2058,8 +2489,7 @@ static void ReconcileLoadedParameterMeshEndpoints(EditorState& editor) {
     }
 }
 
-static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
-    const std::filesystem::path meshPath = GetBinaryMeshSidecarPath(editor.document.path);
+static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem::path& meshPath, std::string& error) {
     if (!std::filesystem::exists(meshPath)) {
         return true;
     }
@@ -2082,7 +2512,11 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     const bool isVersion7 = magicString == std::string("MESHEDB7", 8);
     const bool isVersion8 = magicString == std::string("MESHEDB8", 8);
     const bool isVersion9 = magicString == std::string("MESHEDB9", 8);
-    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9)) {
+    const bool isVersion10 = magicString == std::string("MESHEDBA", 8);
+    const bool isVersion11 = magicString == std::string("MESHEDBB", 8);
+    const bool isVersion12 = magicString == std::string("MESHEDBC", 8);
+    const bool isVersion13 = magicString == std::string("MESHEDBD", 8);
+    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9 && !isVersion10 && !isVersion11 && !isVersion12 && !isVersion13)) {
         error = "Binary mesh file has an invalid header.";
         return false;
     }
@@ -2094,9 +2528,18 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     if (
         !ReadBinaryValue(file, canvasWidth) ||
         !ReadBinaryValue(file, canvasHeight) ||
-        !ReadBinaryString(file, psdName) ||
-        !ReadBinaryValue(file, layerCount)
+        !ReadBinaryString(file, psdName)
     ) {
+        error = "Binary mesh file is truncated.";
+        return false;
+    }
+
+    if ((isVersion11 || isVersion12 || isVersion13) && !ReadBinaryString(file, editor.document.psdPath)) {
+        error = "Project file has an invalid PSD path.";
+        return false;
+    }
+
+    if (!ReadBinaryValue(file, layerCount)) {
         error = "Binary mesh file is truncated.";
         return false;
     }
@@ -2115,6 +2558,8 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         float opacity = 1.0f;
         std::string renderOrderOverride;
         std::vector<int> masks;
+        int textureIndex = -1;
+        std::string textureName;
     };
 
     std::vector<LoadedLayerRecord> loadedRecords;
@@ -2138,7 +2583,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         bool visible = true;
         float opacity = 1.0f;
         std::vector<int> masks;
-        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) {
+        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13) {
             if (!ReadBinaryValue(file, opacity)) {
                 error = "Binary mesh file has invalid layer opacity.";
                 return false;
@@ -2159,12 +2604,12 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         }
 
         std::string renderOrderOverride;
-        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) && !ReadBinaryString(file, renderOrderOverride)) {
+        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13) && !ReadBinaryString(file, renderOrderOverride)) {
             error = "Binary mesh file has invalid layer render order override.";
             return false;
         }
 
-        if (isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) {
+        if (isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13) {
             std::uint8_t savedVisible = 1u;
             if (!ReadBinaryValue(file, savedVisible)) {
                 error = "Binary mesh file has invalid layer visibility.";
@@ -2173,7 +2618,24 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
             visible = savedVisible != 0u;
         }
 
-        if (targetIndex < 0) {
+        int textureIndex = savedIndex;
+        if ((isVersion10 || isVersion11 || isVersion12 || isVersion13) && !ReadBinaryValue(file, textureIndex)) {
+            error = "Binary mesh file has invalid layer texture index.";
+            return false;
+        }
+        std::string textureName;
+        if (isVersion11 && !ReadBinaryString(file, textureName)) {
+            error = "Project file has invalid layer texture name.";
+            return false;
+        }
+        if (isVersion11 && !textureName.empty()) {
+            const int namedTextureIndex = FindTextureIndexByName(editor.document, textureName);
+            if (namedTextureIndex >= 0) {
+                textureIndex = namedTextureIndex;
+            }
+        }
+
+        if (!isVersion10 && !isVersion11 && targetIndex < 0) {
             continue;
         }
 
@@ -2185,10 +2647,24 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         record.opacity = opacity;
         record.renderOrderOverride = std::move(renderOrderOverride);
         record.masks = std::move(masks);
+        record.textureIndex = textureIndex;
+        record.textureName = std::move(textureName);
         loadedRecords.push_back(std::move(record));
     }
 
-    if ((isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) && !loadedRecords.empty()) {
+    if (isVersion10 || isVersion11 || isVersion12 || isVersion13) {
+        editor.document.layers.clear();
+        editor.document.layers.reserve(loadedRecords.size());
+        for (const LoadedLayerRecord& record : loadedRecords) {
+            EditorLayer layer;
+            layer.name = record.savedName;
+            ApplyTextureToLayer(editor.document, layer, record.textureIndex);
+            if (layer.textureIndex < 0 && !editor.document.textures.empty()) {
+                ApplyTextureToLayer(editor.document, layer, 0);
+            }
+            editor.document.layers.push_back(std::move(layer));
+        }
+    } else if ((isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9) && !loadedRecords.empty()) {
         std::vector<EditorLayer> reordered;
         reordered.reserve(editor.document.layers.size());
         std::vector<std::uint8_t> used(editor.document.layers.size(), 0u);
@@ -2211,7 +2687,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
 
     int loadedCount = 0;
     for (std::size_t i = 0; i < loadedRecords.size(); ++i) {
-        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9)
+        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13)
             ? static_cast<int>(i)
             : loadedRecords[i].targetIndex;
         if (!(
@@ -2227,6 +2703,9 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
         layer.opacity = std::clamp(loadedRecords[i].opacity, 0.0f, 1.0f);
         layer.renderOrderOverride = std::move(loadedRecords[i].renderOrderOverride);
         layer.maskLayerIndices = std::move(loadedRecords[i].masks);
+        if (isVersion10 || isVersion11 || isVersion12 || isVersion13) {
+            ApplyTextureToLayer(editor.document, layer, loadedRecords[i].textureIndex);
+        }
         UpdateLayerBoundsFromCurrentMesh(layer);
         ++loadedCount;
     }
@@ -2234,14 +2713,17 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     if (!ReadBinaryHistory(
         file,
         editor,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion7 || isVersion8 || isVersion9,
-        isVersion8 || isVersion9,
-        isVersion9,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion12 || isVersion13,
+        isVersion13
     )) {
         error = "Binary mesh file has invalid history data.";
         return false;
@@ -2250,11 +2732,13 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, std::string& error) {
     if (!ReadBinaryParameters(
         file,
         editor,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9,
-        isVersion7 || isVersion8 || isVersion9,
-        isVersion8 || isVersion9,
-        isVersion9
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13,
+        isVersion12 || isVersion13,
+        isVersion13
     )) {
         error = "Binary mesh file has invalid parameter data.";
         return false;
@@ -2346,20 +2830,225 @@ static bool LoadJsonMeshesForEditor(EditorState& editor, std::string& error) {
 
 static bool LoadMeshesForEditor(EditorState& editor, std::string& error) {
     if (std::filesystem::exists(GetBinaryMeshSidecarPath(editor.document.path))) {
-        return LoadBinaryMeshesForEditor(editor, error);
+        return LoadBinaryMeshesForEditor(editor, GetBinaryMeshSidecarPath(editor.document.path), error);
     }
 
     return LoadJsonMeshesForEditor(editor, error);
 }
 
-bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
-    if (editor.document.path.empty()) {
-        error = "No PSD is loaded.";
+static int FindTextureIndexByName(const EditorDocument& document, const std::string& name) {
+    for (int i = 0; i < static_cast<int>(document.textures.size()); ++i) {
+        if (document.textures[i].name == name) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static std::vector<std::string> CaptureTextureNamesByIndex(const EditorDocument& document) {
+    std::vector<std::string> names;
+    names.reserve(document.textures.size());
+    for (const EditorTexture& texture : document.textures) {
+        names.push_back(texture.name);
+    }
+    return names;
+}
+
+static int RemapTextureIndexByName(
+    const EditorDocument& document,
+    const std::vector<std::string>& oldTextureNames,
+    int oldTextureIndex
+) {
+    if (oldTextureIndex < 0 || oldTextureIndex >= static_cast<int>(oldTextureNames.size())) {
+        return -1;
+    }
+
+    return FindTextureIndexByName(document, oldTextureNames[oldTextureIndex]);
+}
+
+static void RemapParameterTextureIndicesAfterPsdReload(
+    EditorState& editor,
+    const std::vector<std::string>& oldTextureNames
+) {
+    for (DeformParameter& parameter : editor.parameters) {
+        for (DeformParameterLayerState& state : parameter.layers) {
+            state.textureIndexAt0 = RemapTextureIndexByName(editor.document, oldTextureNames, state.textureIndexAt0);
+            state.textureIndexAt1 = RemapTextureIndexByName(editor.document, oldTextureNames, state.textureIndexAt1);
+            for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                setpoint.textureIndex = RemapTextureIndexByName(editor.document, oldTextureNames, setpoint.textureIndex);
+            }
+        }
+    }
+}
+
+static void ResetEditorInteractionState(EditorState& editor) {
+    editor.selectedLayer = editor.document.layers.empty() ? -1 : 0;
+    editor.selectedLayers.clear();
+    if (editor.selectedLayer >= 0) {
+        editor.selectedLayers.push_back(editor.selectedLayer);
+    }
+    editor.selectedVertices.clear();
+    editor.selectedEdges.clear();
+    editor.selectedDeformVertices.clear();
+    editor.draggingLayer = false;
+    editor.draggedLayer = -1;
+    editor.layerTransformMode = LayerTransformMode::None;
+    editor.dragLayerMoved = false;
+    editor.layerDragThresholdPassed = false;
+    editor.draggingMeshSelection = false;
+    editor.meshSelectionMoved = false;
+    editor.deformingVertices = false;
+    editor.deformVerticesMoved = false;
+    editor.deformTransformMode = LayerTransformMode::None;
+    editor.boxSelectingMesh = false;
+    editor.boxSelectionMoved = false;
+    editor.requestFitView = true;
+}
+
+bool AttachPsdToProject(
+    const std::string& path,
+    EditorState& editor,
+    GLFWwindow*,
+    std::string& error
+) {
+    const bool hadNoLayers = editor.document.layers.empty();
+    const std::string projectPath = editor.document.projectPath;
+    const std::string focusedPath = editor.document.path;
+    const std::vector<std::string> oldTextureNames = CaptureTextureNamesByIndex(editor.document);
+
+    std::vector<std::string> layerTextureNames;
+    layerTextureNames.reserve(editor.document.layers.size());
+    for (const EditorLayer& layer : editor.document.layers) {
+        if (layer.textureIndex >= 0 && layer.textureIndex < static_cast<int>(editor.document.textures.size())) {
+            layerTextureNames.push_back(editor.document.textures[layer.textureIndex].name);
+        } else {
+            layerTextureNames.push_back(std::string{});
+        }
+    }
+
+    if (!LoadPsdTextures(path, editor.document, error)) {
         return false;
     }
 
-    const std::filesystem::path meshPath = GetBinaryMeshSidecarPath(editor.document.path);
-    std::filesystem::create_directories(meshPath.parent_path());
+    editor.document.projectPath = projectPath;
+    editor.document.path = focusedPath.empty() ? projectPath : focusedPath;
+    RemapParameterTextureIndicesAfterPsdReload(editor, oldTextureNames);
+
+    if (hadNoLayers) {
+        editor.document.layers.clear();
+        editor.document.layers.reserve(editor.document.textures.size());
+        for (int textureIndex = 0; textureIndex < static_cast<int>(editor.document.textures.size()); ++textureIndex) {
+            const EditorTexture& texture = editor.document.textures[textureIndex];
+            EditorLayer layer = CreateLayerForTexture(texture, textureIndex);
+            layer.mesh = CreateInitialQuadMeshForEditorTexture(texture);
+            ApplyTextureToLayer(editor.document, layer, textureIndex);
+            editor.document.layers.push_back(std::move(layer));
+        }
+    } else {
+        for (int layerIndex = 0; layerIndex < static_cast<int>(editor.document.layers.size()); ++layerIndex) {
+            std::string textureName;
+            if (layerIndex < static_cast<int>(layerTextureNames.size())) {
+                textureName = layerTextureNames[layerIndex];
+            }
+            ApplyTextureToLayer(
+                editor.document,
+                editor.document.layers[layerIndex],
+                FindTextureIndexByName(editor.document, textureName)
+            );
+        }
+    }
+
+    ResetEditorInteractionState(editor);
+    editor.statusText = "Attached PSD: " + path;
+    editor.errorText.clear();
+    return true;
+}
+
+bool LoadProjectForEditor(
+    const std::string& path,
+    EditorState& editor,
+    GLFWwindow* window,
+    std::string& error
+) {
+    DestroyDocument(editor.document);
+    editor.parameters.clear();
+    editor.selectedParameter = -1;
+    editor.history = EditHistory{};
+
+    editor.document.projectPath = path;
+    editor.document.path = path;
+
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe) {
+        error = "Could not open project file: " + path;
+        return false;
+    }
+    char magic[8] = {};
+    probe.read(magic, sizeof(magic));
+    const bool hasProjectPsdField =
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBB", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBC", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBD", 8);
+    std::string projectPsdPath;
+    if (hasProjectPsdField) {
+        std::uint32_t canvasWidth = 0;
+        std::uint32_t canvasHeight = 0;
+        std::string psdName;
+        if (
+            !ReadBinaryValue(probe, canvasWidth) ||
+            !ReadBinaryValue(probe, canvasHeight) ||
+            !ReadBinaryString(probe, psdName) ||
+            !ReadBinaryString(probe, projectPsdPath)
+        ) {
+            error = "Project file has an invalid header.";
+            return false;
+        }
+    }
+    probe.close();
+
+    std::string psdPath;
+    if (!hasProjectPsdField) {
+        psdPath = std::filesystem::path(path).replace_extension(".psd").string();
+        if (std::filesystem::exists(psdPath)) {
+            if (!AttachPsdToProject(psdPath, editor, window, error)) {
+                return false;
+            }
+            editor.document.projectPath = path;
+            editor.document.path = path;
+        }
+    } else if (!projectPsdPath.empty() && std::filesystem::exists(projectPsdPath)) {
+        if (!AttachPsdToProject(projectPsdPath, editor, window, error)) {
+            return false;
+        }
+        editor.document.projectPath = path;
+        editor.document.path = path;
+    } else if (!projectPsdPath.empty()) {
+        editor.document.psdPath = projectPsdPath;
+    }
+
+    if (!LoadBinaryMeshesForEditor(editor, path, error)) {
+        return false;
+    }
+
+    editor.document.projectPath = path;
+    editor.document.path = path;
+    SaveLastProjectPath(path);
+    ResetEditorInteractionState(editor);
+    editor.statusText = "Loaded project: " + path;
+    editor.errorText.clear();
+    return true;
+}
+
+bool SaveProjectForEditor(const EditorState& editor, const std::string& path, std::string& error) {
+    if (path.empty()) {
+        error = "No project path is set.";
+        return false;
+    }
+
+    const std::filesystem::path meshPath(path);
+    if (!meshPath.parent_path().empty()) {
+        std::filesystem::create_directories(meshPath.parent_path());
+    }
 
     std::ofstream file(meshPath, std::ios::binary | std::ios::trunc);
     if (!file) {
@@ -2367,16 +3056,17 @@ bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
         return false;
     }
 
-    file.write("MESHEDB9", 8);
+    file.write("MESHEDBD", 8);
 
     const std::uint32_t canvasWidth = static_cast<std::uint32_t>(std::max(0, editor.document.canvasWidth));
     const std::uint32_t canvasHeight = static_cast<std::uint32_t>(std::max(0, editor.document.canvasHeight));
-    const std::string psdName = std::filesystem::path(editor.document.path).filename().string();
+    const std::string psdName = std::filesystem::path(editor.document.psdPath).filename().string();
 
     if (
         !WriteBinaryValue(file, canvasWidth) ||
         !WriteBinaryValue(file, canvasHeight) ||
-        !WriteBinaryString(file, psdName)
+        !WriteBinaryString(file, psdName) ||
+        !WriteBinaryString(file, editor.document.psdPath)
     ) {
         error = "Could not write binary mesh header.";
         return false;
@@ -2435,6 +3125,20 @@ bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
             error = "Could not write layer visibility.";
             return false;
         }
+
+        if (!WriteBinaryValue(file, layer.textureIndex)) {
+            error = "Could not write layer texture index.";
+            return false;
+        }
+
+        const std::string textureName =
+            layer.textureIndex >= 0 && layer.textureIndex < static_cast<int>(editor.document.textures.size())
+                ? editor.document.textures[layer.textureIndex].name
+                : std::string{};
+        if (!WriteBinaryString(file, textureName)) {
+            error = "Could not write layer texture name.";
+            return false;
+        }
     }
 
     if (!WriteBinaryHistory(file, editor)) {
@@ -2448,6 +3152,15 @@ bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
     }
 
     return true;
+}
+
+bool SaveMeshesForEditor(const EditorState& editor, std::string& error) {
+    const std::string path = !editor.document.projectPath.empty()
+        ? editor.document.projectPath
+        : (!editor.document.path.empty()
+            ? GetDefaultProjectPathForPsd(editor.document.path).string()
+            : std::string{});
+    return SaveProjectForEditor(editor, path, error);
 }
 
 bool LoadPsdIntoEditor(
@@ -2469,33 +3182,42 @@ bool LoadPsdIntoEditor(
     editor.selectedParameter = -1;
 
     editor.document.path = path;
+    editor.document.psdPath = path;
+    editor.document.projectPath = GetDefaultProjectPathForPsd(path).string();
     editor.document.canvasWidth = psd.canvasWidth;
     editor.document.canvasHeight = psd.canvasHeight;
 
+    editor.document.textures.reserve(psd.layers.size());
     editor.document.layers.reserve(psd.layers.size());
 
-    for (const LayerImageRGBA& src : psd.layers) {
+    for (int textureIndex = 0; textureIndex < static_cast<int>(psd.layers.size()); ++textureIndex) {
+        const LayerImageRGBA& src = psd.layers[textureIndex];
+        EditorTexture texture;
+        texture.name = src.name;
+        texture.left = src.left;
+        texture.top = src.top;
+        texture.right = src.right;
+        texture.bottom = src.bottom;
+        texture.width = src.width;
+        texture.height = src.height;
+        texture.alpha = ExtractAlphaChannel(src.rgba, src.width, src.height);
+        std::vector<std::uint8_t> premultipliedRgba = src.rgba;
+        PremultiplyAlpha(premultipliedRgba);
+        texture.baseRgba = premultipliedRgba;
+        texture.renderedRgba = premultipliedRgba;
+        texture.texture = UploadTextureRGBA(premultipliedRgba.data(), src.width, src.height);
+        ComputeTexturePreviewUvs(texture);
+        editor.document.textures.push_back(std::move(texture));
+
         EditorLayer dst;
         dst.name = src.name;
         dst.left = src.left;
         dst.top = src.top;
         dst.right = src.right;
         dst.bottom = src.bottom;
-        dst.width = src.width;
-        dst.height = src.height;
-
-        dst.alpha = ExtractAlphaChannel(src.rgba, src.width, src.height);
-        ComputeLayerPreviewUvs(dst);
-
-        std::vector<std::uint8_t> premultipliedRgba = src.rgba;
-        PremultiplyAlpha(premultipliedRgba);
-        dst.baseRgba = premultipliedRgba;
-        dst.renderedRgba = premultipliedRgba;
-
-        dst.texture = UploadTextureRGBA(premultipliedRgba.data(), src.width, src.height);
-
         dst.visible = src.visible;
         dst.mesh = CreateInitialQuadMeshForLayer(src);
+        ApplyTextureToLayer(editor.document, dst, textureIndex);
 
         editor.document.layers.push_back(std::move(dst));
     }
@@ -2535,7 +3257,7 @@ bool LoadPsdIntoEditor(
         editor.errorText = meshError;
     }
 
-    SaveLastPsdPath(path);
+    SaveLastProjectPath(editor.document.projectPath);
 
     return true;
 }
@@ -2551,4 +3273,5 @@ void TranslateLayerMesh(EditorLayer& layer, float dx, float dy) {
     layer.top += static_cast<int>(std::round(dy));
     layer.bottom += static_cast<int>(std::round(dy));
 }
+
 

@@ -1,29 +1,61 @@
 static void DrawLayerPanel(EditorState& editor) {
     ImGui::Begin("Layers");
+    int pendingDropInsertIndex = -1;
+    bool didDropLayers = false;
 
-    const bool canUndo = !editor.history.undoStack.empty();
-    const bool canRedo = !editor.history.redoStack.empty();
+    if (!editor.document.textures.empty()) {
+        if (ImGui::Button("Add")) {
+            const int textureIndex = IsValidLayerIndex(editor, editor.selectedLayer)
+                ? std::max(0, editor.document.layers[editor.selectedLayer].textureIndex)
+                : 0;
+            AddLayerFromTexture(editor, textureIndex);
+        }
+        ImGui::SameLine();
+        const bool canDuplicateLayer =
+            IsValidLayerIndex(editor, editor.selectedLayer) ||
+            !editor.selectedLayers.empty();
+        if (!canDuplicateLayer) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Duplicate")) {
+            ImGui::OpenPopup("Duplicate Layers");
+        }
+        if (!canDuplicateLayer) {
+            ImGui::EndDisabled();
+        }
+        if (ImGui::BeginPopupModal("Duplicate Layers", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            const std::size_t duplicateCount = editor.selectedLayers.empty()
+                ? (IsValidLayerIndex(editor, editor.selectedLayer) ? 1u : 0u)
+                : editor.selectedLayers.size();
 
-    if (!canUndo) {
-        ImGui::BeginDisabled();
-    }
-    if (ImGui::Button("Undo")) {
-        UndoLastOperation(editor);
-    }
-    if (!canUndo) {
-        ImGui::EndDisabled();
-    }
+            ImGui::Text(
+                "Duplicate %zu selected layer%s?",
+                duplicateCount,
+                duplicateCount == 1u ? "" : "s"
+            );
+            ImGui::Checkbox("Copy Parameters", &editor.duplicateLayerCopyParameters);
 
-    ImGui::SameLine();
+            if (ImGui::Button("OK")) {
+                DuplicateSelectedLayers(editor, editor.duplicateLayerCopyParameters);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                ImGui::CloseCurrentPopup();
+            }
 
-    if (!canRedo) {
-        ImGui::BeginDisabled();
-    }
-    if (ImGui::Button("Redo")) {
-        RedoLastOperation(editor);
-    }
-    if (!canRedo) {
-        ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Delete")) {
+            DeleteLayerFromList(editor, editor.selectedLayer);
+        }
+        if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+            ImGui::EndDisabled();
+        }
     }
 
     ImGui::Separator();
@@ -35,6 +67,32 @@ static void DrawLayerPanel(EditorState& editor) {
     }
 
     ImGui::TextDisabled("Render order: 01 is front");
+
+    auto drawDropLine = []() {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        drawList->AddLine(
+            ImVec2(min.x, min.y),
+            ImVec2(max.x, min.y),
+            IM_COL32(255, 230, 70, 255),
+            2.0f
+        );
+    };
+
+    ImGui::PushID("drop_before_first");
+    ImGui::InvisibleButton("##drop_before_first", ImVec2(ImGui::GetContentRegionAvail().x, 4.0f));
+    if (ImGui::BeginDragDropTarget()) {
+        if (ImGui::IsItemHovered()) {
+            drawDropLine();
+        }
+        if (ImGui::AcceptDragDropPayload("LAYER_REORDER")) {
+            pendingDropInsertIndex = 0;
+            didDropLayers = true;
+        }
+        ImGui::EndDragDropTarget();
+    }
+    ImGui::PopID();
 
     for (int i = 0; i < static_cast<int>(editor.document.layers.size()); ++i) {
         EditorLayer& layer = editor.document.layers[i];
@@ -105,6 +163,14 @@ static void DrawLayerPanel(EditorState& editor) {
         if (ImGui::Selectable(layer.name.c_str(), selected, 0, ImVec2(selectableWidth, previewSize))) {
             HandleLayerSelectionClick(editor, i);
         }
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            if (!IsLayerSelected(editor, i)) {
+                SelectSingleLayer(editor, i);
+            }
+            ImGui::SetDragDropPayload("LAYER_REORDER", &i, sizeof(i));
+            ImGui::Text("%zu layer%s", editor.selectedLayers.size(), editor.selectedLayers.size() == 1u ? "" : "s");
+            ImGui::EndDragDropSource();
+        }
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
             ImGui::OpenPopup("Layer Data");
         }
@@ -115,6 +181,36 @@ static void DrawLayerPanel(EditorState& editor) {
 
         ImGui::EndGroup();
         ImGui::PopID();
+
+        ImGui::PushID("drop_after");
+        ImGui::PushID(i);
+        ImGui::InvisibleButton("##drop_after", ImVec2(ImGui::GetContentRegionAvail().x, 4.0f));
+        if (ImGui::BeginDragDropTarget()) {
+            if (ImGui::IsItemHovered()) {
+                drawDropLine();
+            }
+            if (ImGui::AcceptDragDropPayload("LAYER_REORDER")) {
+                pendingDropInsertIndex = i + 1;
+                didDropLayers = true;
+            }
+            ImGui::EndDragDropTarget();
+        }
+        ImGui::PopID();
+        ImGui::PopID();
+
+        if (didDropLayers) {
+            break;
+        }
+    }
+
+    if (didDropLayers) {
+        std::vector<int> movingLayers = editor.selectedLayers;
+        if (movingLayers.empty() && IsValidLayerIndex(editor, editor.selectedLayer)) {
+            movingLayers.push_back(editor.selectedLayer);
+        }
+        MoveLayerGroupInList(editor, movingLayers, pendingDropInsertIndex);
+        ImGui::End();
+        return;
     }
 
     ImGui::Separator();
@@ -238,20 +334,16 @@ static void DrawViewportControlPanel(EditorState& editor) {
                 : SelectionDragShape::Rectangle;
     }
 
-    ImGui::SameLine();
-
-    if (ImGui::Button(editor.showHistoryPanel ? "Hide History" : "Show History")) {
-        editor.showHistoryPanel = !editor.showHistoryPanel;
-    }
-
-    ImGui::SameLine();
-
     if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
         ImGui::BeginDisabled();
     }
 
     if (ImGui::Button("Generate Mesh")) {
         RequestGenerateMesh(editor);
+    }
+
+    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
@@ -262,9 +354,21 @@ static void DrawViewportControlPanel(EditorState& editor) {
 
     ImGui::SameLine();
 
-    if (ImGui::Button("Save Mesh")) {
-        SaveMeshesFromUi(editor);
+    const bool canAlignMeshes =
+        editor.document.layers.size() >= 2u &&
+        !editor.parameters.empty();
+    if (!canAlignMeshes) {
+        ImGui::BeginDisabled();
     }
+    if (ImGui::Button("Align Meshes")) {
+        InitializeAlignMeshesDefaults(editor);
+        ImGui::OpenPopup("Align Meshes");
+    }
+    if (!canAlignMeshes) {
+        ImGui::EndDisabled();
+    }
+
+    DrawAlignMeshesPopup(editor);
 
     if (editor.mode == EditorMode::Mesh) {
         ImGui::SameLine();
@@ -273,10 +377,6 @@ static void DrawViewportControlPanel(EditorState& editor) {
             editor.selectedVertices.size(),
             editor.selectedEdges.size()
         );
-    }
-
-    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
-        ImGui::EndDisabled();
     }
 }
 

@@ -12,6 +12,14 @@ static void RestoreStraightAlphaBlendCallback(
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
+static std::string DefaultAssetProjectPath() {
+    return (std::filesystem::path("assets") / "project.mesh.bin").string();
+}
+
+static std::string DefaultAssetPsdPath() {
+    return (std::filesystem::path("assets") / "project.psd").string();
+}
+
 static void DrawCheckerboard(
     ImDrawList* drawList,
     ImVec2 origin,
@@ -44,25 +52,121 @@ static void DrawCheckerboard(
 static void DrawTopBar(EditorState& editor, GLFWwindow* window) {
     ImGui::Begin("Project");
 
-    ImGui::TextUnformatted("PSD Path");
-
-    char buffer[1024];
-    std::memset(buffer, 0, sizeof(buffer));
-    std::strncpy(buffer, editor.pendingPath.c_str(), sizeof(buffer) - 1);
-
-    if (ImGui::InputText("##psd_path", buffer, sizeof(buffer))) {
-        editor.pendingPath = buffer;
+    if (ImGui::Button("Load Project")) {
+        editor.pendingProjectPath = editor.document.projectPath.empty()
+            ? (editor.pendingProjectPath.empty() ? DefaultAssetProjectPath() : editor.pendingProjectPath)
+            : editor.document.projectPath;
+        editor.showLoadProjectDialog = true;
+        ImGui::OpenPopup("Load Project");
     }
+    ImGui::SameLine();
 
+    if (ImGui::Button("Save Project")) {
+        std::string error;
+        const std::string savePath = !editor.document.projectPath.empty()
+            ? editor.document.projectPath
+            : editor.pendingProjectPath;
+        if (savePath.empty()) {
+            editor.showSaveProjectAsDialog = true;
+            ImGui::OpenPopup("Save Project As");
+        } else if (SaveProjectForEditor(editor, savePath, error)) {
+            editor.document.projectPath = savePath;
+            editor.document.path = savePath;
+            editor.pendingProjectPath = savePath;
+            SaveLastProjectPath(savePath);
+            editor.statusText = "Saved project.";
+            editor.errorText.clear();
+        } else {
+            editor.errorText = error;
+            editor.statusText = "Project save failed.";
+        }
+    }
+    ImGui::SameLine();
+
+    if (ImGui::Button("Save As Project")) {
+        editor.pendingProjectPath = editor.document.projectPath.empty()
+            ? (editor.pendingProjectPath.empty() ? DefaultAssetProjectPath() : editor.pendingProjectPath)
+            : editor.document.projectPath;
+        editor.showSaveProjectAsDialog = true;
+        ImGui::OpenPopup("Save Project As");
+    }
     ImGui::SameLine();
 
     if (ImGui::Button("Load PSD")) {
-        std::string error;
-        if (!LoadPsdIntoEditor(editor.pendingPath, editor, window, error)) {
-            editor.errorText = error;
-            editor.statusText = "Load failed.";
-        }
+        editor.pendingPsdPath = editor.document.psdPath.empty()
+            ? (editor.pendingPath.empty() ? DefaultAssetPsdPath() : editor.pendingPath)
+            : editor.document.psdPath;
+        editor.showAttachPsdDialog = true;
+        ImGui::OpenPopup("Load PSD");
     }
+
+    auto drawPathDialog = [&](const char* title, std::string& path, const char* actionLabel, auto&& onAccept) {
+        if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+
+        char buffer[1024] = {};
+        std::strncpy(buffer, path.c_str(), sizeof(buffer) - 1);
+        ImGui::SetNextItemWidth(520.0f);
+        if (ImGui::InputText("Path", buffer, sizeof(buffer))) {
+            path = buffer;
+        }
+
+        if (ImGui::Button(actionLabel)) {
+            onAccept();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    };
+
+    if (editor.showLoadProjectDialog) {
+        ImGui::OpenPopup("Load Project");
+        editor.showLoadProjectDialog = false;
+    }
+    drawPathDialog("Load Project", editor.pendingProjectPath, "Load", [&]() {
+        std::string error;
+        if (!LoadProjectForEditor(editor.pendingProjectPath, editor, window, error)) {
+            editor.errorText = error;
+            editor.statusText = "Project load failed.";
+        }
+    });
+
+    if (editor.showSaveProjectAsDialog) {
+        ImGui::OpenPopup("Save Project As");
+        editor.showSaveProjectAsDialog = false;
+    }
+    drawPathDialog("Save Project As", editor.pendingProjectPath, "Save", [&]() {
+        std::string error;
+        if (SaveProjectForEditor(editor, editor.pendingProjectPath, error)) {
+            editor.document.projectPath = editor.pendingProjectPath;
+            editor.document.path = editor.pendingProjectPath;
+            SaveLastProjectPath(editor.pendingProjectPath);
+            editor.statusText = "Saved project.";
+            editor.errorText.clear();
+        } else {
+            editor.errorText = error;
+            editor.statusText = "Project save failed.";
+        }
+    });
+
+    if (editor.showAttachPsdDialog) {
+        ImGui::OpenPopup("Load PSD");
+        editor.showAttachPsdDialog = false;
+    }
+    drawPathDialog("Load PSD", editor.pendingPsdPath, "Load", [&]() {
+        std::string error;
+        if (!AttachPsdToProject(editor.pendingPsdPath, editor, window, error)) {
+            editor.errorText = error;
+            editor.statusText = "PSD load failed.";
+        } else {
+            editor.pendingPath = editor.pendingPsdPath;
+        }
+    });
 
     ImGui::Separator();
 
@@ -72,12 +176,19 @@ static void DrawTopBar(EditorState& editor, GLFWwindow* window) {
         ImGui::TextWrapped("Error: %s", editor.errorText.c_str());
     }
 
-    if (!editor.document.path.empty()) {
+    if (editor.document.canvasWidth > 0 && editor.document.canvasHeight > 0) {
         ImGui::Text("Canvas: %d x %d",
             editor.document.canvasWidth,
             editor.document.canvasHeight
         );
-        ImGui::Text("File: %s", editor.document.path.c_str());
+    }
+    if (!editor.document.projectPath.empty()) {
+        ImGui::Text("Project: %s", editor.document.projectPath.c_str());
+    }
+    if (!editor.document.psdPath.empty()) {
+        ImGui::Text("PSD: %s", editor.document.psdPath.c_str());
+    } else {
+        ImGui::TextDisabled("PSD: none attached");
     }
 
     ImGui::End();
@@ -124,10 +235,10 @@ static void GenerateMeshForLayers(EditorState& editor, const std::vector<int>& l
 static void SaveMeshesFromUi(EditorState& editor) {
     std::string error;
     if (SaveMeshesForEditor(editor, error)) {
-        editor.statusText = "Saved mesh file.";
+        editor.statusText = "Saved project.";
         editor.errorText.clear();
     } else {
-        editor.statusText = "Mesh save failed.";
+        editor.statusText = "Project save failed.";
         editor.errorText = error;
     }
 }
@@ -211,4 +322,3 @@ static void DrawGenerateMeshConfirmationPopup(EditorState& editor) {
 
     ImGui::EndPopup();
 }
-

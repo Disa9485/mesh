@@ -4,6 +4,35 @@ static void DrawViewport(EditorState& editor) {
     DrawViewportControlPanel(editor);
     ImGui::Separator();
 
+    if (ImGui::Button(editor.showHistoryPanel ? "Hide History" : "Show History")) {
+        editor.showHistoryPanel = !editor.showHistoryPanel;
+    }
+    ImGui::SameLine();
+
+    const bool canUndo = !editor.history.undoStack.empty();
+    if (!canUndo) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Undo")) {
+        UndoLastOperation(editor);
+    }
+    if (!canUndo) {
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+
+    const bool canRedo = !editor.history.redoStack.empty();
+    if (!canRedo) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Redo")) {
+        RedoLastOperation(editor);
+    }
+    if (!canRedo) {
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+
     ImGui::Checkbox("Checkerboard", &editor.showCheckerboard);
     ImGui::SameLine();
 
@@ -85,7 +114,11 @@ static void DrawViewport(EditorState& editor) {
         gMaskRenderImagePos = imagePos;
         gMaskRenderZoom = editor.zoom;
 
-        if (editor.mode == EditorMode::Mesh) {
+        const bool snappingParameterForEdit = ContinueParameterEditSetpointSnap(editor);
+
+        if (snappingParameterForEdit) {
+            // Parameter is being eased onto a nearby setpoint; hold off on edits until it lands.
+        } else if (editor.mode == EditorMode::Mesh) {
             HandleMeshEditing(editor, imagePos, hovered, editor.zoom);
         } else if (editor.mode == EditorMode::Layer) {
             deformVertexInputConsumed = HandleDeformVertexEditing(
@@ -98,10 +131,14 @@ static void DrawViewport(EditorState& editor) {
 
         if (
             editor.mode == EditorMode::Layer &&
+            !snappingParameterForEdit &&
             !deformVertexInputConsumed &&
             hovered &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left)
         ) {
+            if (ActiveParameterNeedsSetpointSnapBeforeEdit(editor)) {
+                deformVertexInputConsumed = true;
+            } else {
             const Vec2 canvasPoint = ScreenToCanvasPoint(io.MousePos, imagePos, editor.zoom);
 
             LayerTransformMode transformMode = LayerTransformMode::None;
@@ -161,10 +198,12 @@ static void DrawViewport(EditorState& editor) {
                     editor.layerTransformMode = LayerTransformMode::None;
                 }
             }
+            }
         }
 
         if (
             editor.mode == EditorMode::Layer &&
+            !snappingParameterForEdit &&
             editor.draggingLayer &&
             editor.draggedLayer >= 0 &&
             editor.draggedLayer < static_cast<int>(editor.document.layers.size()) &&

@@ -8,6 +8,7 @@
 #include <GLFW/glfw3.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -28,9 +29,14 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_STENCIL_BITS, 8);
 
+    const EditorWindowSettings windowSettings = LoadEditorWindowSettings();
+    if (windowSettings.maximized) {
+        glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    }
+
     GLFWwindow* window = glfwCreateWindow(
-        1280,
-        800,
+        windowSettings.width,
+        windowSettings.height,
         "PSD Mesh Editor",
         nullptr,
         nullptr
@@ -40,6 +46,10 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to create GLFW window.\n";
         glfwTerminate();
         return EXIT_FAILURE;
+    }
+
+    if (windowSettings.hasPlacement && !windowSettings.maximized) {
+        glfwSetWindowPos(window, windowSettings.x, windowSettings.y);
     }
 
     glfwMakeContextCurrent(window);
@@ -69,14 +79,22 @@ int main(int argc, char** argv) {
     if (argc >= 2 && argv[1]) {
         editor.pendingPath = argv[1];
     } else {
-        editor.pendingPath = LoadLastPsdPath();
+        editor.pendingPath = LoadLastProjectPath();
+        if (editor.pendingPath.empty()) {
+            editor.pendingPath = LoadLastPsdPath();
+        }
     }
 
     if (!editor.pendingPath.empty()) {
         std::string error;
-        if (!LoadPsdIntoEditor(editor.pendingPath, editor, window, error)) {
+        const std::filesystem::path pending(editor.pendingPath);
+        const bool loadAsPsd = pending.extension() == ".psd" || pending.extension() == ".PSD";
+        const bool loaded = loadAsPsd
+            ? LoadPsdIntoEditor(editor.pendingPath, editor, window, error)
+            : LoadProjectForEditor(editor.pendingPath, editor, window, error);
+        if (!loaded) {
             editor.errorText = error;
-            editor.statusText = "Failed to auto-load PSD.";
+            editor.statusText = "Failed to auto-load project.";
         }
     }
 
@@ -99,6 +117,17 @@ int main(int argc, char** argv) {
         imgui.endFrame();
 
         glfwSwapBuffers(window);
+    }
+
+    EditorWindowSettings savedWindowSettings;
+    savedWindowSettings.maximized = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) == GLFW_TRUE;
+    glfwGetWindowPos(window, &savedWindowSettings.x, &savedWindowSettings.y);
+    glfwGetWindowSize(window, &savedWindowSettings.width, &savedWindowSettings.height);
+    savedWindowSettings.hasPlacement = true;
+    SaveEditorWindowSettings(savedWindowSettings);
+
+    if (!editor.document.projectPath.empty()) {
+        SaveLastProjectPath(editor.document.projectPath);
     }
 
     DestroyDocument(editor.document);

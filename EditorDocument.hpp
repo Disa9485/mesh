@@ -18,6 +18,20 @@ bool LoadPsdIntoEditor(
     GLFWwindow* window,
     std::string& error
 );
+bool AttachPsdToProject(
+    const std::string& path,
+    EditorState& editor,
+    GLFWwindow* window,
+    std::string& error
+);
+bool LoadProjectForEditor(
+    const std::string& path,
+    EditorState& editor,
+    GLFWwindow* window,
+    std::string& error
+);
+bool SaveProjectForEditor(const EditorState& editor, const std::string& path, std::string& error);
 bool SaveMeshesForEditor(const EditorState& editor, std::string& error);
 void TranslateLayerMesh(EditorLayer& layer, float dx, float dy);
 void RebuildLayerRenderedTexture(EditorState& editor, int layerIndex);
+void ApplyTextureToLayer(EditorDocument& document, EditorLayer& layer, int textureIndex);
