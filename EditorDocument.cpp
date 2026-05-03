@@ -2272,7 +2272,7 @@ static std::vector<int> CollectMeshParametersForLayerForSave(
 
     for (int parameterIndex = 0; parameterIndex < static_cast<int>(parameters.size()); ++parameterIndex) {
         const DeformParameter& parameter = parameters[parameterIndex];
-        if (parameter.type == DeformParameterType::State || !parameter.affectsMesh || !FindParameterLayerStateForDocument(parameter, layerIndex)) {
+        if (!parameter.affectsMesh || !FindParameterLayerStateForDocument(parameter, layerIndex)) {
             continue;
         }
 

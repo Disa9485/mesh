@@ -903,7 +903,7 @@ static std::vector<int> CollectMeshParametersForLayer(const EditorState& editor,
 
     for (int parameterIndex = 0; parameterIndex < static_cast<int>(editor.parameters.size()); ++parameterIndex) {
         const DeformParameter& parameter = editor.parameters[parameterIndex];
-        if (IsStateParameter(parameter) || !parameter.affectsMesh || !FindParameterLayerState(parameter, layerIndex)) {
+        if (!parameter.affectsMesh || !FindParameterLayerState(parameter, layerIndex)) {
             continue;
         }
 
@@ -1014,7 +1014,7 @@ static bool ApplyMultilinearMeshForLayer(
     upperValues.reserve(parameterIndices.size());
     localValues.reserve(parameterIndices.size());
     for (const int parameterIndex : parameterIndices) {
-        const float value = std::clamp(editor.parameters[parameterIndex].value, 0.0f, 1.0f);
+        const float value = ParameterEvaluationValue(editor.parameters[parameterIndex]);
         const std::vector<float> setpointValues = CollectParameterSetpointValues(editor.parameters[parameterIndex]);
 
         float lower = setpointValues.front();
@@ -1096,7 +1096,7 @@ static bool CurrentValuesAreMeshCorner(
     cornerValues.reserve(parameterIndices.size());
 
     for (const int parameterIndex : parameterIndices) {
-        const float value = std::clamp(editor.parameters[parameterIndex].value, 0.0f, 1.0f);
+        const float value = ParameterEvaluationValue(editor.parameters[parameterIndex]);
         cornerValues.push_back(value);
     }
 
@@ -1323,6 +1323,62 @@ static LayerMesh BuildSeedMeshForMultilinearCorner(
     );
 }
 
+static void CollectMultilinearCornerValueCombinations(
+    const EditorState& editor,
+    const std::vector<int>& parameterIndices,
+    std::vector<std::vector<float>>& combinations
+) {
+    combinations.clear();
+    if (parameterIndices.empty()) {
+        return;
+    }
+
+    std::vector<std::vector<float>> valuesByParameter;
+    valuesByParameter.reserve(parameterIndices.size());
+    std::size_t totalCombinationCount = 1u;
+    constexpr std::size_t kMaxSeededCornerCombinations = 4096u;
+
+    for (const int parameterIndex : parameterIndices) {
+        if (
+            parameterIndex < 0 ||
+            parameterIndex >= static_cast<int>(editor.parameters.size())
+        ) {
+            return;
+        }
+
+        std::vector<float> values = CollectParameterSetpointValues(editor.parameters[parameterIndex]);
+        if (values.empty()) {
+            values.push_back(0.0f);
+            values.push_back(1.0f);
+        }
+
+        totalCombinationCount *= values.size();
+        if (totalCombinationCount > kMaxSeededCornerCombinations) {
+            combinations.clear();
+            return;
+        }
+
+        valuesByParameter.push_back(std::move(values));
+    }
+
+    std::vector<float> current;
+    current.reserve(parameterIndices.size());
+    const std::function<void(std::size_t)> appendCombination = [&](std::size_t parameterOffset) {
+        if (parameterOffset >= valuesByParameter.size()) {
+            combinations.push_back(current);
+            return;
+        }
+
+        for (const float value : valuesByParameter[parameterOffset]) {
+            current.push_back(value);
+            appendCombination(parameterOffset + 1u);
+            current.pop_back();
+        }
+    };
+
+    appendCombination(0u);
+}
+
 static void EnsureMultilinearMeshCornersForLayer(EditorState& editor, int layerIndex) {
     if (!IsValidLayerIndex(editor, layerIndex)) {
         return;
@@ -1333,19 +1389,18 @@ static void EnsureMultilinearMeshCornersForLayer(EditorState& editor, int layerI
         return;
     }
 
-    const std::uint32_t cornerCount = 1u << static_cast<std::uint32_t>(parameterIndices.size());
-    for (std::uint32_t cornerBits = 0; cornerBits < cornerCount; ++cornerBits) {
-        std::vector<float> cornerValues;
-        cornerValues.reserve(parameterIndices.size());
-        for (std::size_t i = 0; i < parameterIndices.size(); ++i) {
-            cornerValues.push_back(((cornerBits >> i) & 1u) ? 1.0f : 0.0f);
-        }
+    std::vector<std::vector<float>> cornerValueCombinations;
+    CollectMultilinearCornerValueCombinations(editor, parameterIndices, cornerValueCombinations);
+    if (cornerValueCombinations.empty()) {
+        return;
+    }
 
-        const LayerMesh seedMesh = BuildSeedMeshForMultilinearCorner(
+    for (const std::vector<float>& cornerValues : cornerValueCombinations) {
+        const LayerMesh seedMesh = BuildSeedMeshForMultilinearCornerValues(
             editor,
             layerIndex,
             parameterIndices,
-            cornerBits
+            cornerValues
         );
 
         for (const int parameterIndex : parameterIndices) {
@@ -1364,6 +1419,42 @@ static void EnsureMultilinearMeshCornersForAllLayers(EditorState& editor) {
     }
 }
 
+static void EnsureCurrentMeshSetpointsForSharedCorner(
+    EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues
+) {
+    if (parameterIndices.size() != cornerValues.size()) {
+        return;
+    }
+
+    for (std::size_t i = 0; i < parameterIndices.size(); ++i) {
+        const int parameterIndex = parameterIndices[i];
+        if (
+            parameterIndex < 0 ||
+            parameterIndex >= static_cast<int>(editor.parameters.size())
+        ) {
+            continue;
+        }
+
+        DeformParameter& parameter = editor.parameters[parameterIndex];
+        DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
+        if (!state) {
+            continue;
+        }
+
+        EnsureStateParameterLayerSetpoints(parameter, *state);
+        if (FindLayerSetpointAtValue(*state, cornerValues[i])) {
+            continue;
+        }
+
+        DeformParameterLayerSetpoint setpoint = EvaluateLayerSetpoint(*state, cornerValues[i]);
+        setpoint.value = cornerValues[i];
+        UpsertLayerSetpoint(*state, setpoint);
+    }
+}
+
 static bool StoreCurrentMeshCornerForLayer(EditorState& editor, int layerIndex, const LayerMesh& mesh) {
     const std::vector<int> parameterIndices = CollectMeshParametersForLayer(editor, layerIndex);
     if (parameterIndices.size() < 2u) {
@@ -1375,6 +1466,13 @@ static bool StoreCurrentMeshCornerForLayer(EditorState& editor, int layerIndex, 
         return false;
     }
 
+    EnsureCurrentMeshSetpointsForSharedCorner(
+        editor,
+        layerIndex,
+        parameterIndices,
+        cornerValues
+    );
+
     for (const int parameterIndex : parameterIndices) {
         DeformParameterLayerState* state =
             FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
@@ -1383,6 +1481,7 @@ static bool StoreCurrentMeshCornerForLayer(EditorState& editor, int layerIndex, 
         }
     }
 
+    EnsureMultilinearMeshCornersForLayer(editor, layerIndex);
     return true;
 }
 
@@ -1522,16 +1621,25 @@ static LayerMesh MeshWithoutOtherParameterDeltas(
 
         const DeformParameter& otherParameter = editor.parameters[parameterIndex];
         const DeformParameterLayerState* otherState = FindParameterLayerState(otherParameter, layerIndex);
-        if (!otherParameter.affectsMesh || !otherState || !CanAccumulateParameterState(endpointMesh, *otherState)) {
+        if (!otherParameter.affectsMesh || !otherState) {
             continue;
         }
 
-        const float value = std::clamp(otherParameter.value, 0.0f, 1.0f);
+        const DeformParameterLayerSetpoint baseSetpoint = EvaluateLayerSetpoint(*otherState, 0.0f);
+        const DeformParameterLayerSetpoint evaluatedSetpoint =
+            EvaluateLayerSetpoint(*otherState, ParameterEvaluationValue(otherParameter));
+        if (
+            !MeshTopologyMatches(endpointMesh, baseSetpoint.mesh) ||
+            !MeshTopologyMatches(endpointMesh, evaluatedSetpoint.mesh)
+        ) {
+            continue;
+        }
+
         for (std::size_t i = 0; i < endpointMesh.vertices.size(); ++i) {
             endpointMesh.vertices[i].position.x -=
-                (otherState->meshAt1.vertices[i].position.x - otherState->meshAt0.vertices[i].position.x) * value;
+                evaluatedSetpoint.mesh.vertices[i].position.x - baseSetpoint.mesh.vertices[i].position.x;
             endpointMesh.vertices[i].position.y -=
-                (otherState->meshAt1.vertices[i].position.y - otherState->meshAt0.vertices[i].position.y) * value;
+                evaluatedSetpoint.mesh.vertices[i].position.y - baseSetpoint.mesh.vertices[i].position.y;
         }
     }
 
@@ -1937,7 +2045,8 @@ static void UpdateActiveParameterEndpointForLayers(
     }
 
     DeformParameter& parameter = editor.parameters[editor.selectedParameter];
-    (void)layerIndices;
+    std::unordered_set<int> editableLayerSet(layerIndices.begin(), layerIndices.end());
+    const bool restrictToLayerSet = !editableLayerSet.empty();
 
     const float setpointValue = ParameterEvaluationValue(parameter);
     constexpr float existingSetpointSnapRadius = 0.05f;
@@ -1963,6 +2072,9 @@ static void UpdateActiveParameterEndpointForLayers(
 
     for (DeformParameterLayerState& parameterLayerState : parameter.layers) {
         const int layerIndex = parameterLayerState.layerIndex;
+        if (restrictToLayerSet && !editableLayerSet.contains(layerIndex)) {
+            continue;
+        }
         if (!IsValidLayerIndex(editor, layerIndex)) {
             continue;
         }
@@ -1988,8 +2100,8 @@ static void UpdateActiveParameterEndpointForLayers(
 
         DeformParameterLayerSetpoint setpoint = EvaluateLayerSetpoint(*state, effectiveSetpointValue);
         setpoint.value = effectiveSetpointValue;
-        if (parameter.affectsMesh) {
-            setpoint.mesh = storedMultilinearMeshCorner ? layer.mesh : endpointMesh;
+        if (parameter.affectsMesh && !storedMultilinearMeshCorner) {
+            setpoint.mesh = endpointMesh;
         }
         if (parameter.affectsTexture) {
             setpoint.textureIndex = layer.textureIndex;

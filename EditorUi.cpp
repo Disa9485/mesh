@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <string>
 #include <unordered_set>
@@ -32,6 +33,7 @@ static void ReconcileParameterMeshesAfterMeshVertexMove(
     int layerIndex,
     const LayerMesh& beforeMesh
 );
+static void RebuildLayersAffectedByLayerGeometry(EditorState& editor, int changedLayerIndex);
 static bool ActiveParameterNeedsSetpointSnapBeforeEdit(EditorState& editor);
 static bool ContinueParameterEditSetpointSnap(EditorState& editor);
 

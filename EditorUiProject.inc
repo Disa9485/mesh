@@ -232,6 +232,61 @@ static void GenerateMeshForLayers(EditorState& editor, const std::vector<int>& l
     }
 }
 
+static void ResetMeshForLayers(EditorState& editor, const std::vector<int>& layerIndices) {
+    const int originalSelectedLayer = editor.selectedLayer;
+    bool resetAnyLayer = false;
+    bool failed = false;
+
+    for (const int layerIndex : layerIndices) {
+        if (!IsValidLayerIndex(editor, layerIndex)) {
+            continue;
+        }
+
+        EditorLayer& layer = editor.document.layers[layerIndex];
+        const LayerHistoryState before = CaptureLayerHistoryState(layer);
+        const std::vector<DeformParameter> parametersBefore = editor.parameters;
+
+        try {
+            layer.mesh = GenerateLayerMesh(layer, editor.meshSettings);
+            UpdateLayerBoundsFromMesh(layer);
+
+            editor.selectedLayer = layerIndex;
+            editor.selectedVertices.clear();
+            editor.selectedEdges.clear();
+            UpdateActiveParameterEndpointForLayers(editor, std::vector<int>{layerIndex});
+            RebuildLayersAffectedByLayerGeometry(editor, layerIndex);
+
+            PushLayerOperationWithParameters(
+                editor,
+                layerIndex,
+                before,
+                CaptureLayerHistoryState(layer),
+                parametersBefore,
+                editor.parameters,
+                "Reset mesh"
+            );
+            resetAnyLayer = true;
+        } catch (const std::exception& ex) {
+            ApplyLayerHistoryState(layer, before);
+            editor.errorText = ex.what();
+            editor.statusText = "Mesh reset failed.";
+            failed = true;
+            break;
+        }
+    }
+
+    if (IsValidLayerIndex(editor, originalSelectedLayer)) {
+        editor.selectedLayer = originalSelectedLayer;
+    } else if (!layerIndices.empty()) {
+        editor.selectedLayer = layerIndices.front();
+    }
+
+    if (!failed) {
+        editor.statusText = resetAnyLayer ? "Reset mesh." : "No mesh was reset.";
+        editor.errorText.clear();
+    }
+}
+
 static void SaveMeshesFromUi(EditorState& editor) {
     std::string error;
     if (SaveMeshesForEditor(editor, error)) {

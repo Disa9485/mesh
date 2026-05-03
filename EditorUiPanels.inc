@@ -342,6 +342,12 @@ static void DrawViewportControlPanel(EditorState& editor) {
         RequestGenerateMesh(editor);
     }
 
+    ImGui::SameLine();
+
+    if (ImGui::Button("Reset Mesh")) {
+        ResetMeshForLayers(editor, GetGenerateMeshTargetLayers(editor));
+    }
+
     if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
         ImGui::EndDisabled();
     }

@@ -385,6 +385,282 @@ static const DeformParameterLayerState* FindParameterLayerStateForHistory(
     return nullptr;
 }
 
+static bool IsStateParameterForHistory(const DeformParameter& parameter) {
+    return parameter.type == DeformParameterType::State;
+}
+
+static float ParameterEvaluationValueForHistory(const DeformParameter& parameter) {
+    return IsStateParameterForHistory(parameter)
+        ? static_cast<float>(std::clamp(
+            parameter.selectedState,
+            0,
+            std::max(0, static_cast<int>(parameter.stateNames.size()) - 1)
+        ))
+        : std::clamp(parameter.value, 0.0f, 1.0f);
+}
+
+static bool NearlyEqualSetpointValueForHistory(float a, float b) {
+    return std::abs(a - b) <= 0.001f;
+}
+
+static DeformParameterLayerSetpoint MakeSetpointFromStateForHistory(
+    const DeformParameterLayerState& state,
+    float value
+) {
+    DeformParameterLayerSetpoint setpoint;
+    setpoint.value = std::clamp(value, 0.0f, 1.0f);
+    if (setpoint.value <= 0.001f) {
+        setpoint.mesh = state.meshAt0;
+        setpoint.textureIndex = state.textureIndexAt0;
+        setpoint.opacity = state.opacityAt0;
+        setpoint.hueShift = state.hueShiftAt0;
+        setpoint.saturationScale = state.saturationScaleAt0;
+        setpoint.lightnessShift = state.lightnessShiftAt0;
+        setpoint.renderOrderOverride = state.renderOrderOverrideAt0;
+        setpoint.maskLayerIndices = state.maskLayerIndicesAt0;
+    } else {
+        setpoint.mesh = state.meshAt1;
+        setpoint.textureIndex = state.textureIndexAt1;
+        setpoint.opacity = state.opacityAt1;
+        setpoint.hueShift = state.hueShiftAt1;
+        setpoint.saturationScale = state.saturationScaleAt1;
+        setpoint.lightnessShift = state.lightnessShiftAt1;
+        setpoint.renderOrderOverride = state.renderOrderOverrideAt1;
+        setpoint.maskLayerIndices = state.maskLayerIndicesAt1;
+    }
+    return setpoint;
+}
+
+static DeformParameterLayerSetpoint EvaluateLayerSetpointForHistory(
+    const DeformParameterLayerState& state,
+    float value
+) {
+    if (state.setpoints.empty()) {
+        return MakeSetpointFromStateForHistory(state, value <= 0.5f ? 0.0f : 1.0f);
+    }
+
+    const DeformParameterLayerSetpoint* lower = &state.setpoints.front();
+    const DeformParameterLayerSetpoint* upper = &state.setpoints.back();
+
+    for (const DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+        if (setpoint.value <= value) {
+            lower = &setpoint;
+        }
+        if (setpoint.value >= value) {
+            upper = &setpoint;
+            break;
+        }
+    }
+
+    if (NearlyEqualSetpointValueForHistory(lower->value, upper->value)) {
+        return *lower;
+    }
+
+    const float localT = std::clamp((value - lower->value) / (upper->value - lower->value), 0.0f, 1.0f);
+    DeformParameterLayerSetpoint result = *lower;
+    result.value = value;
+    result.opacity = lower->opacity + (upper->opacity - lower->opacity) * localT;
+    result.hueShift = lower->hueShift + (upper->hueShift - lower->hueShift) * localT;
+    result.saturationScale = lower->saturationScale + (upper->saturationScale - lower->saturationScale) * localT;
+    result.lightnessShift = lower->lightnessShift + (upper->lightnessShift - lower->lightnessShift) * localT;
+
+    if (MeshVertexCountMatches(lower->mesh, upper->mesh)) {
+        result.mesh = lower->mesh;
+        for (std::size_t i = 0; i < result.mesh.vertices.size(); ++i) {
+            result.mesh.vertices[i].position.x =
+                lower->mesh.vertices[i].position.x +
+                (upper->mesh.vertices[i].position.x - lower->mesh.vertices[i].position.x) * localT;
+            result.mesh.vertices[i].position.y =
+                lower->mesh.vertices[i].position.y +
+                (upper->mesh.vertices[i].position.y - lower->mesh.vertices[i].position.y) * localT;
+        }
+    }
+
+    if (value <= 0.001f) {
+        result.renderOrderOverride = lower->renderOrderOverride;
+        result.maskLayerIndices = lower->maskLayerIndices;
+    } else if (value >= 0.999f) {
+        result.renderOrderOverride = upper->renderOrderOverride;
+        result.maskLayerIndices = upper->maskLayerIndices;
+    }
+
+    return result;
+}
+
+static std::vector<float> CollectParameterSetpointValuesForHistory(const DeformParameter& parameter) {
+    std::vector<float> values;
+    if (IsStateParameterForHistory(parameter)) {
+        const int stateCount = std::max(1, static_cast<int>(parameter.stateNames.size()));
+        values.reserve(static_cast<std::size_t>(stateCount));
+        for (int i = 0; i < stateCount; ++i) {
+            values.push_back(static_cast<float>(i));
+        }
+        return values;
+    }
+
+    values.push_back(0.0f);
+    values.push_back(1.0f);
+
+    for (const DeformParameterLayerState& state : parameter.layers) {
+        for (const DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+            const float value = std::clamp(setpoint.value, 0.0f, 1.0f);
+            const bool exists = std::any_of(values.begin(), values.end(), [&](float existing) {
+                return NearlyEqualSetpointValueForHistory(existing, value);
+            });
+            if (!exists) {
+                values.push_back(value);
+            }
+        }
+    }
+
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+static std::vector<int> CollectMeshParametersForLayerForHistory(
+    const EditorState& editor,
+    int layerIndex
+) {
+    std::vector<int> parameterIndices;
+    for (int parameterIndex = 0; parameterIndex < static_cast<int>(editor.parameters.size()); ++parameterIndex) {
+        const DeformParameter& parameter = editor.parameters[parameterIndex];
+        if (parameter.affectsMesh && FindParameterLayerStateForHistory(parameter, layerIndex)) {
+            parameterIndices.push_back(parameterIndex);
+        }
+    }
+    return parameterIndices;
+}
+
+static bool ParameterIndexListsMatchForHistory(const std::vector<int>& a, const std::vector<int>& b) {
+    return a == b;
+}
+
+static bool ParameterValueListsMatchForHistory(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!NearlyEqualSetpointValueForHistory(a[i], b[i])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static const DeformParameterMeshCorner* FindMeshCornerForHistory(
+    const DeformParameterLayerState& state,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& parameterValues
+) {
+    for (const DeformParameterMeshCorner& corner : state.meshCorners) {
+        if (
+            ParameterIndexListsMatchForHistory(corner.parameterIndices, parameterIndices) &&
+            ParameterValueListsMatchForHistory(corner.parameterValues, parameterValues)
+        ) {
+            return &corner;
+        }
+    }
+
+    return nullptr;
+}
+
+static bool ApplyMultilinearMeshForLayerForHistory(
+    const EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    LayerMesh& resultMesh
+) {
+    if (parameterIndices.size() < 2u || parameterIndices.size() > 12u) {
+        return false;
+    }
+
+    const DeformParameterLayerState* cornerSource = nullptr;
+    for (const int parameterIndex : parameterIndices) {
+        const DeformParameterLayerState* state =
+            FindParameterLayerStateForHistory(editor.parameters[parameterIndex], layerIndex);
+        if (state && !state->meshCorners.empty()) {
+            cornerSource = state;
+            break;
+        }
+    }
+
+    if (!cornerSource) {
+        return false;
+    }
+
+    std::vector<float> lowerValues;
+    std::vector<float> upperValues;
+    std::vector<float> localValues;
+    lowerValues.reserve(parameterIndices.size());
+    upperValues.reserve(parameterIndices.size());
+    localValues.reserve(parameterIndices.size());
+
+    for (const int parameterIndex : parameterIndices) {
+        const DeformParameter& parameter = editor.parameters[parameterIndex];
+        const float value = ParameterEvaluationValueForHistory(parameter);
+        const std::vector<float> setpointValues = CollectParameterSetpointValuesForHistory(parameter);
+
+        float lower = setpointValues.front();
+        float upper = setpointValues.back();
+        for (const float setpointValue : setpointValues) {
+            if (setpointValue <= value) {
+                lower = setpointValue;
+            }
+            if (setpointValue >= value) {
+                upper = setpointValue;
+                break;
+            }
+        }
+
+        lowerValues.push_back(lower);
+        upperValues.push_back(upper);
+        localValues.push_back(
+            NearlyEqualSetpointValueForHistory(lower, upper)
+                ? 0.0f
+                : std::clamp((value - lower) / (upper - lower), 0.0f, 1.0f)
+        );
+    }
+
+    const std::uint32_t cornerCount = 1u << static_cast<std::uint32_t>(parameterIndices.size());
+    std::vector<LayerMesh> cornerMeshes(cornerCount);
+    for (std::uint32_t cornerBits = 0; cornerBits < cornerCount; ++cornerBits) {
+        std::vector<float> cornerValues;
+        cornerValues.reserve(parameterIndices.size());
+        for (std::size_t i = 0; i < parameterIndices.size(); ++i) {
+            cornerValues.push_back(((cornerBits >> i) & 1u) ? upperValues[i] : lowerValues[i]);
+        }
+
+        const DeformParameterMeshCorner* storedCorner =
+            FindMeshCornerForHistory(*cornerSource, parameterIndices, cornerValues);
+        if (!storedCorner || !MeshVertexCountMatches(resultMesh, storedCorner->mesh)) {
+            return false;
+        }
+        cornerMeshes[cornerBits] = storedCorner->mesh;
+    }
+
+    resultMesh = cornerMeshes[0];
+    for (MeshVertex& vertex : resultMesh.vertices) {
+        vertex.position = Vec2{0.0f, 0.0f};
+    }
+
+    for (std::uint32_t cornerBits = 0; cornerBits < cornerCount; ++cornerBits) {
+        float weight = 1.0f;
+        for (std::size_t i = 0; i < localValues.size(); ++i) {
+            weight *= ((cornerBits >> i) & 1u) ? localValues[i] : (1.0f - localValues[i]);
+        }
+
+        const LayerMesh& cornerMesh = cornerMeshes[cornerBits];
+        for (std::size_t i = 0; i < resultMesh.vertices.size(); ++i) {
+            resultMesh.vertices[i].position.x += cornerMesh.vertices[i].position.x * weight;
+            resultMesh.vertices[i].position.y += cornerMesh.vertices[i].position.y * weight;
+        }
+    }
+
+    return true;
+}
+
 static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
     for (int layerIndex = 0; layerIndex < static_cast<int>(editor.document.layers.size()); ++layerIndex) {
         const DeformParameterLayerState* meshBaseState = nullptr;
@@ -424,18 +700,22 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         }
 
         EditorLayer& layer = editor.document.layers[layerIndex];
-        LayerMesh resultMesh = meshBaseState ? meshBaseState->meshAt0 : layer.mesh;
-        int resultTextureIndex = textureBaseState ? textureBaseState->textureIndexAt0 : layer.textureIndex;
-        float resultOpacity = opacityBaseState ? opacityBaseState->opacityAt0 : layer.opacity;
-        float resultHueShift = colorBaseState ? colorBaseState->hueShiftAt0 : layer.hueShift;
-        float resultSaturationScale = colorBaseState ? colorBaseState->saturationScaleAt0 : layer.saturationScale;
-        float resultLightnessShift = colorBaseState ? colorBaseState->lightnessShiftAt0 : layer.lightnessShift;
+        LayerMesh resultMesh = meshBaseState ? EvaluateLayerSetpointForHistory(*meshBaseState, 0.0f).mesh : layer.mesh;
+        int resultTextureIndex = textureBaseState ? EvaluateLayerSetpointForHistory(*textureBaseState, 0.0f).textureIndex : layer.textureIndex;
+        float resultOpacity = opacityBaseState ? EvaluateLayerSetpointForHistory(*opacityBaseState, 0.0f).opacity : layer.opacity;
+        float resultHueShift = colorBaseState ? EvaluateLayerSetpointForHistory(*colorBaseState, 0.0f).hueShift : layer.hueShift;
+        float resultSaturationScale = colorBaseState ? EvaluateLayerSetpointForHistory(*colorBaseState, 0.0f).saturationScale : layer.saturationScale;
+        float resultLightnessShift = colorBaseState ? EvaluateLayerSetpointForHistory(*colorBaseState, 0.0f).lightnessShift : layer.lightnessShift;
         std::string resultRenderOrderOverride = renderOrderBaseState
             ? renderOrderBaseState->renderOrderOverrideAt0
             : layer.renderOrderOverride;
         std::vector<int> resultMaskLayerIndices = maskingBaseState
             ? maskingBaseState->maskLayerIndicesAt0
             : layer.maskLayerIndices;
+        const std::vector<int> meshParameterIndices =
+            CollectMeshParametersForLayerForHistory(editor, layerIndex);
+        const bool usingMultilinearMesh =
+            ApplyMultilinearMeshForLayerForHistory(editor, layerIndex, meshParameterIndices, resultMesh);
 
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerStateForHistory(parameter, layerIndex);
@@ -443,40 +723,49 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
                 continue;
             }
 
-            const float value = std::clamp(parameter.value, 0.0f, 1.0f);
-            if (
-                parameter.affectsMesh &&
-                MeshVertexCountMatches(resultMesh, state->meshAt0) &&
-                MeshVertexCountMatches(resultMesh, state->meshAt1)
-            ) {
+            const float value = ParameterEvaluationValueForHistory(parameter);
+            if (!usingMultilinearMesh && parameter.affectsMesh) {
+                const DeformParameterLayerSetpoint base = EvaluateLayerSetpointForHistory(*state, 0.0f);
+                const DeformParameterLayerSetpoint evaluated = EvaluateLayerSetpointForHistory(*state, value);
+                if (!MeshVertexCountMatches(resultMesh, base.mesh) || !MeshVertexCountMatches(resultMesh, evaluated.mesh)) {
+                    continue;
+                }
                 for (std::size_t i = 0; i < resultMesh.vertices.size(); ++i) {
                     resultMesh.vertices[i].position.x +=
-                        (state->meshAt1.vertices[i].position.x - state->meshAt0.vertices[i].position.x) * value;
+                        evaluated.mesh.vertices[i].position.x - base.mesh.vertices[i].position.x;
                     resultMesh.vertices[i].position.y +=
-                        (state->meshAt1.vertices[i].position.y - state->meshAt0.vertices[i].position.y) * value;
+                        evaluated.mesh.vertices[i].position.y - base.mesh.vertices[i].position.y;
                 }
             }
 
             if (parameter.affectsOpacity) {
-                resultOpacity += (state->opacityAt1 - state->opacityAt0) * value;
+                resultOpacity +=
+                    EvaluateLayerSetpointForHistory(*state, value).opacity -
+                    EvaluateLayerSetpointForHistory(*state, 0.0f).opacity;
             }
             if (parameter.affectsTexture) {
-                resultTextureIndex = value >= 0.999f ? state->textureIndexAt1 : state->textureIndexAt0;
+                resultTextureIndex = EvaluateLayerSetpointForHistory(*state, value).textureIndex;
             }
             if (parameter.affectsColor) {
-                resultHueShift += (state->hueShiftAt1 - state->hueShiftAt0) * value;
-                resultSaturationScale += (state->saturationScaleAt1 - state->saturationScaleAt0) * value;
-                resultLightnessShift += (state->lightnessShiftAt1 - state->lightnessShiftAt0) * value;
+                const DeformParameterLayerSetpoint evaluated = EvaluateLayerSetpointForHistory(*state, value);
+                const DeformParameterLayerSetpoint base = EvaluateLayerSetpointForHistory(*state, 0.0f);
+                resultHueShift += evaluated.hueShift - base.hueShift;
+                resultSaturationScale += evaluated.saturationScale - base.saturationScale;
+                resultLightnessShift += evaluated.lightnessShift - base.lightnessShift;
             }
             if (parameter.affectsRenderOrder && value <= 0.001f) {
-                resultRenderOrderOverride = state->renderOrderOverrideAt0;
+                resultRenderOrderOverride = EvaluateLayerSetpointForHistory(*state, value).renderOrderOverride;
             } else if (parameter.affectsRenderOrder && value >= 0.999f) {
-                resultRenderOrderOverride = state->renderOrderOverrideAt1;
+                resultRenderOrderOverride = EvaluateLayerSetpointForHistory(*state, value).renderOrderOverride;
+            } else if (parameter.affectsRenderOrder) {
+                resultRenderOrderOverride = EvaluateLayerSetpointForHistory(*state, value).renderOrderOverride;
             }
             if (parameter.affectsMasking && value <= 0.001f) {
-                resultMaskLayerIndices = state->maskLayerIndicesAt0;
+                resultMaskLayerIndices = EvaluateLayerSetpointForHistory(*state, value).maskLayerIndices;
             } else if (parameter.affectsMasking && value >= 0.999f) {
-                resultMaskLayerIndices = state->maskLayerIndicesAt1;
+                resultMaskLayerIndices = EvaluateLayerSetpointForHistory(*state, value).maskLayerIndices;
+            } else if (parameter.affectsMasking) {
+                resultMaskLayerIndices = EvaluateLayerSetpointForHistory(*state, value).maskLayerIndices;
             }
         }
 
@@ -527,6 +816,7 @@ static void RestoreParameterSnapshot(
 
         if (current) {
             editor.parameters[i].value = current->value;
+            editor.parameters[i].selectedState = current->selectedState;
         }
     }
 
