@@ -16,6 +16,9 @@ LayerHistoryState CaptureLayerHistoryState(const EditorLayer& layer) {
     state.bottom = layer.bottom;
     state.visible = layer.visible;
     state.opacity = layer.opacity;
+    state.hueShift = layer.hueShift;
+    state.saturationScale = layer.saturationScale;
+    state.lightnessShift = layer.lightnessShift;
     state.renderOrderOverride = layer.renderOrderOverride;
     state.maskLayerIndices = layer.maskLayerIndices;
     state.mesh = layer.mesh;
@@ -30,6 +33,9 @@ void ApplyLayerHistoryState(EditorLayer& layer, const LayerHistoryState& state) 
     layer.bottom = state.bottom;
     layer.visible = state.visible;
     layer.opacity = state.opacity;
+    layer.hueShift = state.hueShift;
+    layer.saturationScale = state.saturationScale;
+    layer.lightnessShift = state.lightnessShift;
     layer.renderOrderOverride = state.renderOrderOverride;
     layer.maskLayerIndices = state.maskLayerIndices;
     layer.mesh = state.mesh;
@@ -96,6 +102,9 @@ static bool AreParameterLayerSetpointsEqual(
             !AreLayerMeshesEqual(a[i].mesh, b[i].mesh) ||
             a[i].textureIndex != b[i].textureIndex ||
             a[i].opacity != b[i].opacity ||
+            a[i].hueShift != b[i].hueShift ||
+            a[i].saturationScale != b[i].saturationScale ||
+            a[i].lightnessShift != b[i].lightnessShift ||
             a[i].renderOrderOverride != b[i].renderOrderOverride ||
             a[i].maskLayerIndices != b[i].maskLayerIndices
         ) {
@@ -118,6 +127,12 @@ static bool AreParameterLayerStatesEqual(
         a.textureIndexAt1 == b.textureIndexAt1 &&
         a.opacityAt0 == b.opacityAt0 &&
         a.opacityAt1 == b.opacityAt1 &&
+        a.hueShiftAt0 == b.hueShiftAt0 &&
+        a.hueShiftAt1 == b.hueShiftAt1 &&
+        a.saturationScaleAt0 == b.saturationScaleAt0 &&
+        a.saturationScaleAt1 == b.saturationScaleAt1 &&
+        a.lightnessShiftAt0 == b.lightnessShiftAt0 &&
+        a.lightnessShiftAt1 == b.lightnessShiftAt1 &&
         a.renderOrderOverrideAt0 == b.renderOrderOverrideAt0 &&
         a.renderOrderOverrideAt1 == b.renderOrderOverrideAt1 &&
         a.maskLayerIndicesAt0 == b.maskLayerIndicesAt0 &&
@@ -146,6 +161,7 @@ static bool AreParameterListsEqual(
             a[i].affectsMasking != b[i].affectsMasking ||
             a[i].affectsOpacity != b[i].affectsOpacity ||
             a[i].affectsTexture != b[i].affectsTexture ||
+            a[i].affectsColor != b[i].affectsColor ||
             a[i].layers.size() != b[i].layers.size()
         ) {
             return false;
@@ -177,6 +193,9 @@ static bool AreLayerHistoryStatesEqual(
         a.bottom == b.bottom &&
         a.visible == b.visible &&
         a.opacity == b.opacity &&
+        a.hueShift == b.hueShift &&
+        a.saturationScale == b.saturationScale &&
+        a.lightnessShift == b.lightnessShift &&
         a.renderOrderOverride == b.renderOrderOverride &&
         a.maskLayerIndices == b.maskLayerIndices &&
         AreLayerMeshesEqual(a.mesh, b.mesh);
@@ -373,6 +392,7 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         const DeformParameterLayerState* renderOrderBaseState = nullptr;
         const DeformParameterLayerState* maskingBaseState = nullptr;
         const DeformParameterLayerState* textureBaseState = nullptr;
+        const DeformParameterLayerState* colorBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerStateForHistory(parameter, layerIndex);
             if (!state) {
@@ -394,9 +414,12 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             if (parameter.affectsTexture && !textureBaseState) {
                 textureBaseState = state;
             }
+            if (parameter.affectsColor && !colorBaseState) {
+                colorBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState) {
             continue;
         }
 
@@ -404,6 +427,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         LayerMesh resultMesh = meshBaseState ? meshBaseState->meshAt0 : layer.mesh;
         int resultTextureIndex = textureBaseState ? textureBaseState->textureIndexAt0 : layer.textureIndex;
         float resultOpacity = opacityBaseState ? opacityBaseState->opacityAt0 : layer.opacity;
+        float resultHueShift = colorBaseState ? colorBaseState->hueShiftAt0 : layer.hueShift;
+        float resultSaturationScale = colorBaseState ? colorBaseState->saturationScaleAt0 : layer.saturationScale;
+        float resultLightnessShift = colorBaseState ? colorBaseState->lightnessShiftAt0 : layer.lightnessShift;
         std::string resultRenderOrderOverride = renderOrderBaseState
             ? renderOrderBaseState->renderOrderOverrideAt0
             : layer.renderOrderOverride;
@@ -437,6 +463,11 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             if (parameter.affectsTexture) {
                 resultTextureIndex = value >= 0.999f ? state->textureIndexAt1 : state->textureIndexAt0;
             }
+            if (parameter.affectsColor) {
+                resultHueShift += (state->hueShiftAt1 - state->hueShiftAt0) * value;
+                resultSaturationScale += (state->saturationScaleAt1 - state->saturationScaleAt0) * value;
+                resultLightnessShift += (state->lightnessShiftAt1 - state->lightnessShiftAt0) * value;
+            }
             if (parameter.affectsRenderOrder && value <= 0.001f) {
                 resultRenderOrderOverride = state->renderOrderOverrideAt0;
             } else if (parameter.affectsRenderOrder && value >= 0.999f) {
@@ -454,6 +485,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             ApplyTextureToLayer(editor.document, layer, resultTextureIndex);
         }
         layer.opacity = std::clamp(resultOpacity, 0.0f, 1.0f);
+        layer.hueShift = std::clamp(resultHueShift, -100.0f, 100.0f);
+        layer.saturationScale = std::clamp(resultSaturationScale, 0.0f, 200.0f);
+        layer.lightnessShift = std::clamp(resultLightnessShift, -100.0f, 100.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
         UpdateLayerBoundsFromMesh(layer);

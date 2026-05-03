@@ -46,10 +46,36 @@ struct MaskRenderResources {
     GLint displaySizeLocation = -1;
 };
 
+struct LayerColorRenderResources {
+    GLuint program = 0;
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint ebo = 0;
+    GLint displaySizeLocation = -1;
+    GLint projectionLocation = -1;
+    GLint hueShiftLocation = -1;
+    GLint saturationScaleLocation = -1;
+    GLint lightnessShiftLocation = -1;
+    GLint opacityLocation = -1;
+};
+
+struct LayerColorDrawParams {
+    int layerIndex = -1;
+    ImVec2 imagePos = ImVec2(0.0f, 0.0f);
+    ImVec2 imageSize = ImVec2(0.0f, 0.0f);
+    float zoom = 1.0f;
+    bool deformMode = false;
+    float hueShift = 0.0f;
+    float saturationScale = 100.0f;
+    float lightnessShift = 0.0f;
+    float opacity = 1.0f;
+};
+
 static EditorState* gMaskRenderEditor = nullptr;
 static ImVec2 gMaskRenderImagePos;
 static float gMaskRenderZoom = 1.0f;
 static MaskRenderGlState gMaskRenderSavedState;
+static std::vector<LayerColorDrawParams> gLayerColorDrawParams;
 
 static GLuint CompileMaskShader(GLenum type, const char* source) {
     const GLuint shader = glCreateShader(type);
@@ -147,6 +173,251 @@ static MaskRenderResources& GetMaskRenderResources() {
     glBindVertexArray(0);
 
     return resources;
+}
+
+static LayerColorRenderResources& GetLayerColorRenderResources() {
+    static LayerColorRenderResources resources;
+    if (resources.program) {
+        return resources;
+    }
+
+    constexpr const char* vertexSource = R"GLSL(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aUv;
+        uniform vec2 uDisplaySize;
+        out vec2 vUv;
+        void main() {
+            vec2 ndc = vec2(
+                (aPos.x / uDisplaySize.x) * 2.0 - 1.0,
+                1.0 - (aPos.y / uDisplaySize.y) * 2.0
+            );
+            gl_Position = vec4(ndc, 0.0, 1.0);
+            vUv = aUv;
+        }
+    )GLSL";
+
+    constexpr const char* fragmentSource = R"GLSL(
+        #version 330 core
+        uniform sampler2D Texture;
+        uniform float uHueShift;
+        uniform float uSaturationScale;
+        uniform float uLightnessShift;
+        uniform float uOpacity;
+        in vec2 vUv;
+        layout (location = 0) out vec4 Out_Color;
+
+        vec3 rgbToHsl(vec3 c) {
+            float maxc = max(max(c.r, c.g), c.b);
+            float minc = min(min(c.r, c.g), c.b);
+            float h = 0.0;
+            float s = 0.0;
+            float l = (maxc + minc) * 0.5;
+            float d = maxc - minc;
+            if (d > 0.00001) {
+                s = l > 0.5 ? d / (2.0 - maxc - minc) : d / (maxc + minc);
+                if (maxc == c.r) {
+                    h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+                } else if (maxc == c.g) {
+                    h = (c.b - c.r) / d + 2.0;
+                } else {
+                    h = (c.r - c.g) / d + 4.0;
+                }
+                h /= 6.0;
+            }
+            return vec3(h, s, l);
+        }
+
+        float hueToRgb(float p, float q, float t) {
+            if (t < 0.0) t += 1.0;
+            if (t > 1.0) t -= 1.0;
+            if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+            if (t < 1.0 / 2.0) return q;
+            if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+            return p;
+        }
+
+        vec3 hslToRgb(vec3 hsl) {
+            float h = hsl.x;
+            float s = hsl.y;
+            float l = hsl.z;
+            if (s <= 0.00001) {
+                return vec3(l);
+            }
+            float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+            float p = 2.0 * l - q;
+            return vec3(
+                hueToRgb(p, q, h + 1.0 / 3.0),
+                hueToRgb(p, q, h),
+                hueToRgb(p, q, h - 1.0 / 3.0)
+            );
+        }
+
+        void main() {
+            vec4 tex = texture(Texture, vUv);
+            float alpha = tex.a * uOpacity;
+            if (alpha <= 0.0) {
+                Out_Color = vec4(0.0);
+                return;
+            }
+
+            vec3 straight = tex.a > 0.00001 ? tex.rgb / tex.a : vec3(0.0);
+            vec3 hsl = rgbToHsl(clamp(straight, 0.0, 1.0));
+            hsl.x = fract(hsl.x + uHueShift);
+            hsl.y = clamp(hsl.y * uSaturationScale, 0.0, 1.0);
+            hsl.z = clamp(hsl.z + uLightnessShift, 0.0, 1.0);
+            vec3 rgb = hslToRgb(hsl);
+            Out_Color = vec4(rgb * alpha, alpha);
+        }
+    )GLSL";
+
+    const GLuint vertexShader = CompileMaskShader(GL_VERTEX_SHADER, vertexSource);
+    const GLuint fragmentShader = CompileMaskShader(GL_FRAGMENT_SHADER, fragmentSource);
+    if (!vertexShader || !fragmentShader) {
+        if (vertexShader) {
+            glDeleteShader(vertexShader);
+        }
+        if (fragmentShader) {
+            glDeleteShader(fragmentShader);
+        }
+        return resources;
+    }
+
+    resources.program = glCreateProgram();
+    glAttachShader(resources.program, vertexShader);
+    glAttachShader(resources.program, fragmentShader);
+    glLinkProgram(resources.program);
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    GLint linked = 0;
+    glGetProgramiv(resources.program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        glDeleteProgram(resources.program);
+        resources.program = 0;
+        return resources;
+    }
+
+    resources.displaySizeLocation = glGetUniformLocation(resources.program, "uDisplaySize");
+    resources.hueShiftLocation = glGetUniformLocation(resources.program, "uHueShift");
+    resources.saturationScaleLocation = glGetUniformLocation(resources.program, "uSaturationScale");
+    resources.lightnessShiftLocation = glGetUniformLocation(resources.program, "uLightnessShift");
+    resources.opacityLocation = glGetUniformLocation(resources.program, "uOpacity");
+    glUseProgram(resources.program);
+    glUniform1i(glGetUniformLocation(resources.program, "Texture"), 0);
+
+    glGenVertexArrays(1, &resources.vao);
+    glGenBuffers(1, &resources.vbo);
+    glGenBuffers(1, &resources.ebo);
+
+    glBindVertexArray(resources.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, resources.vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, resources.ebo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, reinterpret_cast<void*>(sizeof(float) * 2));
+    glBindVertexArray(0);
+    return resources;
+}
+
+static bool LayerHasColorAdjustment(const EditorLayer& layer) {
+    return
+        std::abs(layer.hueShift) > 0.001f ||
+        std::abs(layer.saturationScale - 100.0f) > 0.001f ||
+        std::abs(layer.lightnessShift) > 0.001f;
+}
+
+static void SaveMaskRenderGlState(MaskRenderGlState& state);
+static void RestoreMaskRenderGlState(const MaskRenderGlState& state);
+
+static void DrawLayerColorAdjustCallback(const ImDrawList*, const ImDrawCmd* cmd) {
+    const LayerColorDrawParams* params = static_cast<const LayerColorDrawParams*>(cmd->UserCallbackData);
+    if (!params || !gMaskRenderEditor || !IsValidLayerIndex(*gMaskRenderEditor, params->layerIndex)) {
+        return;
+    }
+
+    const EditorLayer& layer = gMaskRenderEditor->document.layers[params->layerIndex];
+    if (!layer.texture) {
+        return;
+    }
+
+    std::vector<float> vertices;
+    std::vector<std::uint32_t> indices;
+
+    if (params->deformMode) {
+        if (layer.mesh.vertices.empty() || layer.mesh.indices.empty()) {
+            return;
+        }
+
+        vertices.reserve(layer.mesh.vertices.size() * 4u);
+        for (const MeshVertex& vertex : layer.mesh.vertices) {
+            const ImVec2 screen = CanvasToScreenPoint(vertex.position, params->imagePos, params->zoom);
+            vertices.push_back(screen.x);
+            vertices.push_back(screen.y);
+            vertices.push_back(vertex.uv.x);
+            vertices.push_back(vertex.uv.y);
+        }
+
+        indices.reserve(layer.mesh.indices.size());
+        for (std::size_t i = 0; i + 2u < layer.mesh.indices.size(); i += 3u) {
+            const std::uint32_t ia = layer.mesh.indices[i + 0u];
+            const std::uint32_t ib = layer.mesh.indices[i + 1u];
+            const std::uint32_t ic = layer.mesh.indices[i + 2u];
+            if (
+                ia >= layer.mesh.vertices.size() ||
+                ib >= layer.mesh.vertices.size() ||
+                ic >= layer.mesh.vertices.size() ||
+                !MeshTriangleEdgesValid(layer.mesh, ia, ib, ic)
+            ) {
+                continue;
+            }
+
+            indices.push_back(ia);
+            indices.push_back(ib);
+            indices.push_back(ic);
+        }
+    } else {
+        const ImVec2 min = params->imagePos;
+        const ImVec2 max(params->imagePos.x + params->imageSize.x, params->imagePos.y + params->imageSize.y);
+        vertices = {
+            min.x, min.y, 0.0f, 0.0f,
+            max.x, min.y, 1.0f, 0.0f,
+            max.x, max.y, 1.0f, 1.0f,
+            min.x, max.y, 0.0f, 1.0f
+        };
+        indices = {0u, 1u, 2u, 0u, 2u, 3u};
+    }
+
+    if (indices.empty()) {
+        return;
+    }
+
+    LayerColorRenderResources& resources = GetLayerColorRenderResources();
+    if (!resources.program) {
+        return;
+    }
+
+    MaskRenderGlState savedState;
+    SaveMaskRenderGlState(savedState);
+
+    const ImGuiIO& io = ImGui::GetIO();
+    glUseProgram(resources.program);
+    glUniform2f(resources.displaySizeLocation, io.DisplaySize.x, io.DisplaySize.y);
+    glUniform1f(resources.hueShiftLocation, std::clamp(params->hueShift, -100.0f, 100.0f) / 100.0f);
+    glUniform1f(resources.saturationScaleLocation, std::clamp(params->saturationScale, 0.0f, 200.0f) / 100.0f);
+    glUniform1f(resources.lightnessShiftLocation, std::clamp(params->lightnessShift, -100.0f, 100.0f) / 100.0f);
+    glUniform1f(resources.opacityLocation, std::clamp(params->opacity, 0.0f, 1.0f));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, layer.texture);
+    glBindVertexArray(resources.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, resources.vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(float)), vertices.data(), GL_STREAM_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, resources.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t)), indices.data(), GL_STREAM_DRAW);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
+
+    RestoreMaskRenderGlState(savedState);
 }
 
 static void SaveMaskRenderGlState(MaskRenderGlState& state) {
@@ -426,6 +697,7 @@ static void DrawLayerWithGpuMasks(
     bool deformMode
 ) {
     const bool hasMasks = !layer.maskLayerIndices.empty();
+    const bool hasColorAdjustment = LayerHasColorAdjustment(layer);
     const int opacityByte = static_cast<int>(std::round(std::clamp(layer.opacity, 0.0f, 1.0f) * 255.0f));
     const ImU32 tint = IM_COL32(opacityByte, opacityByte, opacityByte, opacityByte);
     if (hasMasks) {
@@ -435,7 +707,22 @@ static void DrawLayerWithGpuMasks(
         );
     }
 
-    if (deformMode) {
+    if (hasColorAdjustment) {
+        gLayerColorDrawParams.push_back(LayerColorDrawParams{
+            layerIndex,
+            imagePos,
+            imageSize,
+            zoom,
+            deformMode,
+            layer.hueShift,
+            layer.saturationScale,
+            layer.lightnessShift,
+            layer.opacity
+        });
+        drawList->AddCallback(DrawLayerColorAdjustCallback, &gLayerColorDrawParams.back());
+        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        drawList->AddCallback(SetPremultipliedAlphaBlendCallback, nullptr);
+    } else if (deformMode) {
         DrawTexturedLayerMesh(drawList, layer, imagePos, zoom, tint);
     } else {
         DrawLayerTexture(drawList, layer, imagePos, imageSize, tint);
@@ -681,4 +968,3 @@ static void DrawSelectedVertexTransformBox(
     drawList->AddCircleFilled(center, 8.0f, moveFill, 16);
     drawList->AddCircle(center, 8.0f, boxColor, 16, 1.5f);
 }
-

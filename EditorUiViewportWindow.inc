@@ -304,6 +304,8 @@ static void DrawViewport(EditorState& editor) {
 
         std::vector<int> renderOrder;
         renderOrder.reserve(editor.document.layers.size());
+        gLayerColorDrawParams.clear();
+        gLayerColorDrawParams.reserve(editor.document.layers.size());
         for (int i = 0; i < static_cast<int>(editor.document.layers.size()); ++i) {
             renderOrder.push_back(i);
         }

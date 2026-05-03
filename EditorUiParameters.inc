@@ -157,12 +157,18 @@ static DeformParameterLayerSetpoint MakeSetpointFromState(
         setpoint.mesh = state.meshAt0;
         setpoint.textureIndex = state.textureIndexAt0;
         setpoint.opacity = state.opacityAt0;
+        setpoint.hueShift = state.hueShiftAt0;
+        setpoint.saturationScale = state.saturationScaleAt0;
+        setpoint.lightnessShift = state.lightnessShiftAt0;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt0;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt0;
     } else {
         setpoint.mesh = state.meshAt1;
         setpoint.textureIndex = state.textureIndexAt1;
         setpoint.opacity = state.opacityAt1;
+        setpoint.hueShift = state.hueShiftAt1;
+        setpoint.saturationScale = state.saturationScaleAt1;
+        setpoint.lightnessShift = state.lightnessShiftAt1;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt1;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt1;
     }
@@ -231,6 +237,9 @@ static DeformParameterLayerSetpoint MakeStateSetpointFromLayer(
     setpoint.mesh = layer.mesh;
     setpoint.textureIndex = layer.textureIndex;
     setpoint.opacity = layer.opacity;
+    setpoint.hueShift = layer.hueShift;
+    setpoint.saturationScale = layer.saturationScale;
+    setpoint.lightnessShift = layer.lightnessShift;
     setpoint.renderOrderOverride = layer.renderOrderOverride;
     setpoint.maskLayerIndices = layer.maskLayerIndices;
     return setpoint;
@@ -807,6 +816,9 @@ static DeformParameterLayerSetpoint EvaluateLayerSetpoint(
     DeformParameterLayerSetpoint result = *lower;
     result.value = tValue;
     result.opacity = lower->opacity + (upper->opacity - lower->opacity) * localT;
+    result.hueShift = lower->hueShift + (upper->hueShift - lower->hueShift) * localT;
+    result.saturationScale = lower->saturationScale + (upper->saturationScale - lower->saturationScale) * localT;
+    result.lightnessShift = lower->lightnessShift + (upper->lightnessShift - lower->lightnessShift) * localT;
 
     if (MeshTopologyMatches(lower->mesh, upper->mesh)) {
         result.mesh = lower->mesh;
@@ -1388,6 +1400,7 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         const DeformParameterLayerState* renderOrderBaseState = nullptr;
         const DeformParameterLayerState* maskingBaseState = nullptr;
         const DeformParameterLayerState* textureBaseState = nullptr;
+        const DeformParameterLayerState* colorBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
             if (!state) {
@@ -1409,9 +1422,12 @@ static void ApplyAllDeformParameters(EditorState& editor) {
             if (parameter.affectsTexture && !textureBaseState) {
                 textureBaseState = state;
             }
+            if (parameter.affectsColor && !colorBaseState) {
+                colorBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState) {
             continue;
         }
 
@@ -1419,6 +1435,9 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         LayerMesh resultMesh = meshBaseState ? EvaluateLayerSetpoint(*meshBaseState, 0.0f).mesh : layer.mesh;
         int resultTextureIndex = textureBaseState ? EvaluateLayerSetpoint(*textureBaseState, 0.0f).textureIndex : layer.textureIndex;
         float resultOpacity = opacityBaseState ? EvaluateLayerSetpoint(*opacityBaseState, 0.0f).opacity : layer.opacity;
+        float resultHueShift = colorBaseState ? EvaluateLayerSetpoint(*colorBaseState, 0.0f).hueShift : layer.hueShift;
+        float resultSaturationScale = colorBaseState ? EvaluateLayerSetpoint(*colorBaseState, 0.0f).saturationScale : layer.saturationScale;
+        float resultLightnessShift = colorBaseState ? EvaluateLayerSetpoint(*colorBaseState, 0.0f).lightnessShift : layer.lightnessShift;
         std::string resultRenderOrderOverride = renderOrderBaseState
             ? renderOrderBaseState->renderOrderOverrideAt0
             : layer.renderOrderOverride;
@@ -1447,6 +1466,13 @@ static void ApplyAllDeformParameters(EditorState& editor) {
             if (parameter.affectsTexture) {
                 resultTextureIndex = EvaluateLayerSetpoint(*state, value).textureIndex;
             }
+            if (parameter.affectsColor) {
+                const DeformParameterLayerSetpoint evaluated = EvaluateLayerSetpoint(*state, value);
+                const DeformParameterLayerSetpoint base = EvaluateLayerSetpoint(*state, 0.0f);
+                resultHueShift += evaluated.hueShift - base.hueShift;
+                resultSaturationScale += evaluated.saturationScale - base.saturationScale;
+                resultLightnessShift += evaluated.lightnessShift - base.lightnessShift;
+            }
 
             if (parameter.affectsRenderOrder && value <= 0.001f) {
                 resultRenderOrderOverride = EvaluateLayerSetpoint(*state, value).renderOrderOverride;
@@ -1472,6 +1498,9 @@ static void ApplyAllDeformParameters(EditorState& editor) {
             ApplyTextureToLayer(editor.document, layer, resultTextureIndex);
         }
         layer.opacity = std::clamp(resultOpacity, 0.0f, 1.0f);
+        layer.hueShift = std::clamp(resultHueShift, -100.0f, 100.0f);
+        layer.saturationScale = std::clamp(resultSaturationScale, 0.0f, 200.0f);
+        layer.lightnessShift = std::clamp(resultLightnessShift, -100.0f, 100.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
         UpdateLayerBoundsFromMesh(layer);
@@ -1547,6 +1576,12 @@ static DeformParameterLayerState CreateParameterLayerStateForLayer(
     state.textureIndexAt1 = layer.textureIndex;
     state.opacityAt0 = layer.opacity;
     state.opacityAt1 = layer.opacity;
+    state.hueShiftAt0 = layer.hueShift;
+    state.hueShiftAt1 = layer.hueShift;
+    state.saturationScaleAt0 = layer.saturationScale;
+    state.saturationScaleAt1 = layer.saturationScale;
+    state.lightnessShiftAt0 = layer.lightnessShift;
+    state.lightnessShiftAt1 = layer.lightnessShift;
     state.renderOrderOverrideAt0 = layer.renderOrderOverride;
     state.renderOrderOverrideAt1 = layer.renderOrderOverride;
     state.maskLayerIndicesAt0 = layer.maskLayerIndices;
@@ -1572,6 +1607,7 @@ static void AddDeformParameter(EditorState& editor, DeformParameterType type = D
     parameter.affectsMasking = false;
     parameter.affectsOpacity = false;
     parameter.affectsTexture = false;
+    parameter.affectsColor = false;
     if (type == DeformParameterType::State) {
         parameter.stateNames.push_back("Default");
         parameter.selectedState = 0;
@@ -1961,6 +1997,11 @@ static void UpdateActiveParameterEndpointForLayers(
         if (parameter.affectsOpacity) {
             setpoint.opacity = endpointOpacity;
         }
+        if (parameter.affectsColor) {
+            setpoint.hueShift = layer.hueShift;
+            setpoint.saturationScale = layer.saturationScale;
+            setpoint.lightnessShift = layer.lightnessShift;
+        }
         if (parameter.affectsRenderOrder) {
             setpoint.renderOrderOverride = layer.renderOrderOverride;
         }
@@ -1979,6 +2020,11 @@ static void UpdateActiveParameterEndpointForLayers(
             if (parameter.affectsOpacity) {
                 state->opacityAt0 = endpointOpacity;
             }
+            if (parameter.affectsColor) {
+                state->hueShiftAt0 = layer.hueShift;
+                state->saturationScaleAt0 = layer.saturationScale;
+                state->lightnessShiftAt0 = layer.lightnessShift;
+            }
             if (parameter.affectsRenderOrder) {
                 state->renderOrderOverrideAt0 = layer.renderOrderOverride;
             }
@@ -1994,6 +2040,11 @@ static void UpdateActiveParameterEndpointForLayers(
             }
             if (parameter.affectsOpacity) {
                 state->opacityAt1 = endpointOpacity;
+            }
+            if (parameter.affectsColor) {
+                state->hueShiftAt1 = layer.hueShift;
+                state->saturationScaleAt1 = layer.saturationScale;
+                state->lightnessShiftAt1 = layer.lightnessShift;
             }
             if (parameter.affectsRenderOrder) {
                 state->renderOrderOverrideAt1 = layer.renderOrderOverride;
@@ -2443,6 +2494,32 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                     state.textureIndexAt1 = neutralTexture;
                     for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
                         setpoint.textureIndex = neutralTexture;
+                    }
+                }
+                PushParameterChannelOperation(editor, before, selectedBefore, "Change parameter channels");
+            }
+
+            bool affectsColor = parameter.affectsColor;
+            if (ImGui::Checkbox("Color", &affectsColor)) {
+                const std::vector<DeformParameter> before = editor.parameters;
+                const int selectedBefore = editor.selectedParameter;
+                parameter.affectsColor = affectsColor;
+                for (DeformParameterLayerState& state : parameter.layers) {
+                    if (!IsValidLayerIndex(editor, state.layerIndex)) {
+                        continue;
+                    }
+
+                    const EditorLayer& layer = editor.document.layers[state.layerIndex];
+                    state.hueShiftAt0 = layer.hueShift;
+                    state.hueShiftAt1 = layer.hueShift;
+                    state.saturationScaleAt0 = layer.saturationScale;
+                    state.saturationScaleAt1 = layer.saturationScale;
+                    state.lightnessShiftAt0 = layer.lightnessShift;
+                    state.lightnessShiftAt1 = layer.lightnessShift;
+                    for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                        setpoint.hueShift = layer.hueShift;
+                        setpoint.saturationScale = layer.saturationScale;
+                        setpoint.lightnessShift = layer.lightnessShift;
                     }
                 }
                 PushParameterChannelOperation(editor, before, selectedBefore, "Change parameter channels");

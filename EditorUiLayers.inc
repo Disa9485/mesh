@@ -175,6 +175,11 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
             if (parameter.affectsOpacity) {
                 targetSetpoint->opacity = endpointOpacity;
             }
+            if (parameter.affectsColor) {
+                targetSetpoint->hueShift = layer.hueShift;
+                targetSetpoint->saturationScale = layer.saturationScale;
+                targetSetpoint->lightnessShift = layer.lightnessShift;
+            }
             if (parameter.affectsRenderOrder) {
                 targetSetpoint->renderOrderOverride = layer.renderOrderOverride;
             }
@@ -204,6 +209,11 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
             if (parameter.affectsOpacity) {
                 state.opacityAt0 = endpointOpacity;
             }
+            if (parameter.affectsColor) {
+                state.hueShiftAt0 = layer.hueShift;
+                state.saturationScaleAt0 = layer.saturationScale;
+                state.lightnessShiftAt0 = layer.lightnessShift;
+            }
             if (parameter.affectsRenderOrder) {
                 state.renderOrderOverrideAt0 = layer.renderOrderOverride;
             }
@@ -216,6 +226,11 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
         } else if (updateOne) {
             if (parameter.affectsOpacity) {
                 state.opacityAt1 = endpointOpacity;
+            }
+            if (parameter.affectsColor) {
+                state.hueShiftAt1 = layer.hueShift;
+                state.saturationScaleAt1 = layer.saturationScale;
+                state.lightnessShiftAt1 = layer.lightnessShift;
             }
             if (parameter.affectsRenderOrder) {
                 state.renderOrderOverrideAt1 = layer.renderOrderOverride;
@@ -728,6 +743,99 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
             "Change layer opacity"
         );
     }
+
+    if (ImGui::Button("Color")) {
+        editor.showLayerColorDialog = true;
+        editor.colorDialogLayer = layerIndex;
+        editor.colorDialogHue = layer.hueShift;
+        editor.colorDialogSaturation = layer.saturationScale;
+        editor.colorDialogLightness = layer.lightnessShift;
+        editor.colorDialogOriginalHue = layer.hueShift;
+        editor.colorDialogOriginalSaturation = layer.saturationScale;
+        editor.colorDialogOriginalLightness = layer.lightnessShift;
+        ImGui::OpenPopup("Layer Color");
+    }
+
+    if (editor.showLayerColorDialog) {
+        ImGui::OpenPopup("Layer Color");
+        editor.showLayerColorDialog = false;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::BeginPopupModal("Layer Color", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!IsValidLayerIndex(editor, editor.colorDialogLayer)) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            EditorLayer& colorLayer = editor.document.layers[editor.colorDialogLayer];
+            ImGui::TextWrapped("%s", colorLayer.name.c_str());
+            ImGui::SetNextItemWidth(320.0f);
+            if (ImGui::SliderFloat("Hue", &editor.colorDialogHue, -100.0f, 100.0f, "%.0f")) {
+                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+            }
+            ImGui::SetNextItemWidth(320.0f);
+            if (ImGui::SliderFloat("Saturation", &editor.colorDialogSaturation, 0.0f, 200.0f, "%.0f")) {
+                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+            }
+            ImGui::SetNextItemWidth(320.0f);
+            if (ImGui::SliderFloat("Lightness", &editor.colorDialogLightness, -100.0f, 100.0f, "%.0f")) {
+                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+            }
+
+            if (ImGui::Button("Copy")) {
+                editor.hasLayerColorClipboard = true;
+                editor.colorClipboardHue = editor.colorDialogHue;
+                editor.colorClipboardSaturation = editor.colorDialogSaturation;
+                editor.colorClipboardLightness = editor.colorDialogLightness;
+            }
+            ImGui::SameLine();
+            if (!editor.hasLayerColorClipboard) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Paste")) {
+                editor.colorDialogHue = editor.colorClipboardHue;
+                editor.colorDialogSaturation = editor.colorClipboardSaturation;
+                editor.colorDialogLightness = editor.colorClipboardLightness;
+                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+            }
+            if (!editor.hasLayerColorClipboard) {
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Confirm")) {
+                const std::vector<DeformParameter> parametersBefore = editor.parameters;
+                LayerHistoryState before = CaptureLayerHistoryState(colorLayer);
+                before.hueShift = editor.colorDialogOriginalHue;
+                before.saturationScale = editor.colorDialogOriginalSaturation;
+                before.lightnessShift = editor.colorDialogOriginalLightness;
+                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                UpdateActiveParameterEndpointForLayers(editor, std::vector<int>{editor.colorDialogLayer});
+                PushLayerOperationWithParameters(
+                    editor,
+                    editor.colorDialogLayer,
+                    before,
+                    CaptureLayerHistoryState(colorLayer),
+                    parametersBefore,
+                    editor.parameters,
+                    "Change layer color"
+                );
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                colorLayer.hueShift = editor.colorDialogOriginalHue;
+                colorLayer.saturationScale = editor.colorDialogOriginalSaturation;
+                colorLayer.lightnessShift = editor.colorDialogOriginalLightness;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
 
     char renderOrderBuffer[64] = {};
     std::strncpy(renderOrderBuffer, layer.renderOrderOverride.c_str(), sizeof(renderOrderBuffer) - 1u);

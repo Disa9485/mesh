@@ -69,6 +69,9 @@ struct DeformParameterLayerSetpoint {
     LayerMesh mesh;
     int textureIndex = -1;
     float opacity = 1.0f;
+    float hueShift = 0.0f;
+    float saturationScale = 100.0f;
+    float lightnessShift = 0.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
 };
@@ -83,6 +86,12 @@ struct DeformParameterLayerState {
     std::vector<DeformParameterLayerSetpoint> setpoints;
     float opacityAt0 = 1.0f;
     float opacityAt1 = 1.0f;
+    float hueShiftAt0 = 0.0f;
+    float hueShiftAt1 = 0.0f;
+    float saturationScaleAt0 = 100.0f;
+    float saturationScaleAt1 = 100.0f;
+    float lightnessShiftAt0 = 0.0f;
+    float lightnessShiftAt1 = 0.0f;
     std::string renderOrderOverrideAt0;
     std::string renderOrderOverrideAt1;
     std::vector<int> maskLayerIndicesAt0;
@@ -105,6 +114,7 @@ struct DeformParameter {
     bool affectsMasking = true;
     bool affectsOpacity = true;
     bool affectsTexture = false;
+    bool affectsColor = false;
     std::vector<DeformParameterLayerState> layers;
 };
 
@@ -127,6 +137,9 @@ struct LayerHistoryState {
     int bottom = 0;
     bool visible = true;
     float opacity = 1.0f;
+    float hueShift = 0.0f;
+    float saturationScale = 100.0f;
+    float lightnessShift = 0.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
     LayerMesh mesh;
@@ -189,6 +202,9 @@ struct EditorLayer {
     GLuint texture = 0;
     bool visible = true;
     float opacity = 1.0f;
+    float hueShift = 0.0f;
+    float saturationScale = 100.0f;
+    float lightnessShift = 0.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
     float previewU0 = 0.0f;
@@ -325,6 +341,18 @@ struct EditorState {
     int alignMeshesSourceLayer = -1;
     int alignMeshesParameter = -1;
     float alignMeshesStartSetpoint = 0.0f;
+    bool showLayerColorDialog = false;
+    int colorDialogLayer = -1;
+    float colorDialogHue = 0.0f;
+    float colorDialogSaturation = 100.0f;
+    float colorDialogLightness = 0.0f;
+    float colorDialogOriginalHue = 0.0f;
+    float colorDialogOriginalSaturation = 100.0f;
+    float colorDialogOriginalLightness = 0.0f;
+    bool hasLayerColorClipboard = false;
+    float colorClipboardHue = 0.0f;
+    float colorClipboardSaturation = 100.0f;
+    float colorClipboardLightness = 0.0f;
     bool pendingGenerateMeshConfirmation = false;
     std::vector<int> pendingGenerateMeshLayers;
 };
