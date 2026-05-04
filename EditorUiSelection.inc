@@ -253,6 +253,89 @@ static void RefreshMeshVertexUv(const EditorLayer& layer, MeshVertex& vertex) {
     vertex.uv.y = std::clamp(vertex.position.y * invH, 0.0f, 1.0f);
 }
 
+static bool ComputeBarycentricForUi(
+    Vec2 p,
+    Vec2 a,
+    Vec2 b,
+    Vec2 c,
+    float& wa,
+    float& wb,
+    float& wc
+) {
+    const Vec2 v0{b.x - a.x, b.y - a.y};
+    const Vec2 v1{c.x - a.x, c.y - a.y};
+    const Vec2 v2{p.x - a.x, p.y - a.y};
+    const float d00 = Dot(v0, v0);
+    const float d01 = Dot(v0, v1);
+    const float d11 = Dot(v1, v1);
+    const float d20 = Dot(v2, v0);
+    const float d21 = Dot(v2, v1);
+    const float denom = d00 * d11 - d01 * d01;
+    if (std::abs(denom) <= 0.000001f) {
+        return false;
+    }
+
+    wb = (d11 * d20 - d01 * d21) / denom;
+    wc = (d00 * d21 - d01 * d20) / denom;
+    wa = 1.0f - wb - wc;
+
+    constexpr float kEpsilon = -0.0005f;
+    return wa >= kEpsilon && wb >= kEpsilon && wc >= kEpsilon;
+}
+
+static bool TryComputeMeshUvAtCanvasPoint(const LayerMesh& mesh, Vec2 point, Vec2& uv) {
+    for (std::size_t i = 0; i + 2u < mesh.indices.size(); i += 3u) {
+        const std::uint32_t ia = mesh.indices[i + 0u];
+        const std::uint32_t ib = mesh.indices[i + 1u];
+        const std::uint32_t ic = mesh.indices[i + 2u];
+        if (
+            ia >= mesh.vertices.size() ||
+            ib >= mesh.vertices.size() ||
+            ic >= mesh.vertices.size()
+        ) {
+            continue;
+        }
+
+        const MeshVertex& a = mesh.vertices[ia];
+        const MeshVertex& b = mesh.vertices[ib];
+        const MeshVertex& c = mesh.vertices[ic];
+
+        float wa = 0.0f;
+        float wb = 0.0f;
+        float wc = 0.0f;
+        if (!ComputeBarycentricForUi(point, a.position, b.position, c.position, wa, wb, wc)) {
+            continue;
+        }
+
+        uv.x = std::clamp(a.uv.x * wa + b.uv.x * wb + c.uv.x * wc, 0.0f, 1.0f);
+        uv.y = std::clamp(a.uv.y * wa + b.uv.y * wb + c.uv.y * wc, 0.0f, 1.0f);
+        return true;
+    }
+
+    return false;
+}
+
+static void RefreshMeshVertexUvForMeshEdit(EditorState& editor, int layerIndex, MeshVertex& vertex) {
+    if (
+        layerIndex >= 0 &&
+        layerIndex < static_cast<int>(editor.meshModeGuideMeshes.size())
+    ) {
+        Vec2 uv;
+        if (TryComputeMeshUvAtCanvasPoint(
+            editor.meshModeGuideMeshes[static_cast<std::size_t>(layerIndex)],
+            vertex.position,
+            uv
+        )) {
+            vertex.uv = uv;
+            return;
+        }
+    }
+
+    if (IsValidLayerIndex(editor, layerIndex)) {
+        RefreshMeshVertexUv(editor.document.layers[layerIndex], vertex);
+    }
+}
+
 static Vec2 LayerMeshBoundsCenter(const LayerMesh& mesh) {
     float x0 = 0.0f;
     float y0 = 0.0f;
@@ -328,17 +411,10 @@ static int PickEdgeAtCanvasPoint(
     return -1;
 }
 
-static MeshVertex CreateMeshVertexAtPoint(const EditorLayer& layer, Vec2 point) {
-    const float invW = 1.0f / static_cast<float>(std::max(1, layer.width));
-    const float invH = 1.0f / static_cast<float>(std::max(1, layer.height));
-
-    return MeshVertex{
-        point,
-        Vec2{
-            std::clamp(point.x * invW, 0.0f, 1.0f),
-            std::clamp(point.y * invH, 0.0f, 1.0f)
-        }
-    };
+static MeshVertex CreateMeshVertexAtPoint(EditorState& editor, int layerIndex, Vec2 point) {
+    MeshVertex vertex{point, Vec2{}};
+    RefreshMeshVertexUvForMeshEdit(editor, layerIndex, vertex);
+    return vertex;
 }
 
 static bool MeshHasEdge(const LayerMesh& mesh, std::uint32_t a, std::uint32_t b) {
@@ -969,7 +1045,7 @@ static void AddVertexAtCanvasPoint(EditorState& editor, Vec2 canvasPoint, bool c
         ? static_cast<int>(ActiveSelectedVertex(editor))
         : -1;
 
-    layer.mesh.vertices.push_back(CreateMeshVertexAtPoint(layer, canvasPoint));
+    layer.mesh.vertices.push_back(CreateMeshVertexAtPoint(editor, editor.selectedLayer, canvasPoint));
     const std::uint32_t newVertex =
         static_cast<std::uint32_t>(layer.mesh.vertices.size() - 1u);
 

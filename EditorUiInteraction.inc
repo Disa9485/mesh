@@ -5,6 +5,19 @@ static void HandleMeshEditing(
     float zoom
 ) {
     if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            const ImGuiIO& io = ImGui::GetIO();
+            const Vec2 canvasPoint = ScreenToCanvasPoint(io.MousePos, imagePos, zoom);
+            const int pickedLayer = PickTopmostLayerAtCanvasPoint(
+                editor,
+                canvasPoint.x,
+                canvasPoint.y
+            );
+
+            if (IsValidLayerIndex(editor, pickedLayer)) {
+                SelectSingleLayer(editor, pickedLayer);
+            }
+        }
         return;
     }
 
@@ -115,7 +128,7 @@ static void HandleMeshEditing(
 
                 layer.mesh.vertices[vertex].position.x += dx;
                 layer.mesh.vertices[vertex].position.y += dy;
-                RefreshMeshVertexUv(layer, layer.mesh.vertices[vertex]);
+                RefreshMeshVertexUvForMeshEdit(editor, editor.selectedLayer, layer.mesh.vertices[vertex]);
             }
 
             editor.lastMeshDragCanvasPos = canvasPoint;

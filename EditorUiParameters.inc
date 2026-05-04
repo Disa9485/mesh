@@ -1606,6 +1606,90 @@ static void ApplyAllDeformParameters(EditorState& editor) {
     }
 }
 
+static void ApplyBaseParameterStateForMeshEditing(EditorState& editor) {
+    for (DeformParameter& parameter : editor.parameters) {
+        EnsureStateParameterDefaults(parameter);
+        for (DeformParameterLayerState& state : parameter.layers) {
+            EnsureStateParameterLayerSetpoints(parameter, state);
+        }
+    }
+
+    for (int layerIndex = 0; layerIndex < static_cast<int>(editor.document.layers.size()); ++layerIndex) {
+        const DeformParameterLayerState* meshBaseState = nullptr;
+        const DeformParameterLayerState* opacityBaseState = nullptr;
+        const DeformParameterLayerState* renderOrderBaseState = nullptr;
+        const DeformParameterLayerState* maskingBaseState = nullptr;
+        const DeformParameterLayerState* textureBaseState = nullptr;
+        const DeformParameterLayerState* colorBaseState = nullptr;
+
+        for (const DeformParameter& parameter : editor.parameters) {
+            const DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
+            if (!state) {
+                continue;
+            }
+
+            if (parameter.affectsMesh && !meshBaseState) {
+                meshBaseState = state;
+            }
+            if (parameter.affectsOpacity && !opacityBaseState) {
+                opacityBaseState = state;
+            }
+            if (parameter.affectsRenderOrder && !renderOrderBaseState) {
+                renderOrderBaseState = state;
+            }
+            if (parameter.affectsMasking && !maskingBaseState) {
+                maskingBaseState = state;
+            }
+            if (parameter.affectsTexture && !textureBaseState) {
+                textureBaseState = state;
+            }
+            if (parameter.affectsColor && !colorBaseState) {
+                colorBaseState = state;
+            }
+        }
+
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState) {
+            continue;
+        }
+
+        EditorLayer& layer = editor.document.layers[layerIndex];
+        if (meshBaseState) {
+            layer.mesh = EvaluateLayerSetpoint(*meshBaseState, 0.0f).mesh;
+            UpdateLayerBoundsFromMesh(layer);
+        }
+        if (textureBaseState) {
+            ApplyTextureToLayer(
+                editor.document,
+                layer,
+                EvaluateLayerSetpoint(*textureBaseState, 0.0f).textureIndex
+            );
+        }
+        if (opacityBaseState) {
+            layer.opacity = std::clamp(EvaluateLayerSetpoint(*opacityBaseState, 0.0f).opacity, 0.0f, 1.0f);
+        }
+        if (colorBaseState) {
+            const DeformParameterLayerSetpoint color = EvaluateLayerSetpoint(*colorBaseState, 0.0f);
+            layer.hueShift = std::clamp(color.hueShift, -100.0f, 100.0f);
+            layer.saturationScale = std::clamp(color.saturationScale, 0.0f, 200.0f);
+            layer.lightnessShift = std::clamp(color.lightnessShift, -100.0f, 100.0f);
+        }
+        if (renderOrderBaseState) {
+            layer.renderOrderOverride = EvaluateLayerSetpoint(*renderOrderBaseState, 0.0f).renderOrderOverride;
+        }
+        if (maskingBaseState) {
+            layer.maskLayerIndices = EvaluateLayerSetpoint(*maskingBaseState, 0.0f).maskLayerIndices;
+        }
+    }
+}
+
+static void CaptureMeshModeGuideMeshes(EditorState& editor) {
+    editor.meshModeGuideMeshes.clear();
+    editor.meshModeGuideMeshes.reserve(editor.document.layers.size());
+    for (const EditorLayer& layer : editor.document.layers) {
+        editor.meshModeGuideMeshes.push_back(layer.mesh);
+    }
+}
+
 static LayerMesh MeshWithoutOtherParameterDeltas(
     const EditorState& editor,
     int selectedParameterIndex,
@@ -2461,6 +2545,11 @@ static void DrawAlignMeshesPopup(EditorState& editor) {
 static void DrawDeformParametersPanel(EditorState& editor) {
     ImGui::Begin("Parameters");
 
+    const bool parametersFrozen = editor.mode == EditorMode::Mesh;
+    if (parametersFrozen) {
+        ImGui::TextDisabled("Frozen in Mesh mode.");
+    }
+
     if (editor.selectedLayers.empty()) {
         ImGui::BeginDisabled();
     }
@@ -2651,6 +2740,10 @@ static void DrawDeformParametersPanel(EditorState& editor) {
             ImGui::EndPopup();
         }
 
+        if (parametersFrozen) {
+            ImGui::BeginDisabled();
+        }
+
         if (IsStateParameter(parameter)) {
             EnsureStateParameterDefaults(parameter);
             const char* preview = parameter.stateNames[static_cast<std::size_t>(parameter.selectedState)].c_str();
@@ -2747,6 +2840,10 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                 editor.selectedParameter = i;
                 ApplyAllDeformParameters(editor);
             }
+        }
+
+        if (parametersFrozen) {
+            ImGui::EndDisabled();
         }
 
         if (selected) {

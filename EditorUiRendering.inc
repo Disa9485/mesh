@@ -65,6 +65,7 @@ struct LayerColorDrawParams {
     ImVec2 imageSize = ImVec2(0.0f, 0.0f);
     float zoom = 1.0f;
     bool deformMode = false;
+    const LayerMesh* renderMesh = nullptr;
     float hueShift = 0.0f;
     float saturationScale = 100.0f;
     float lightnessShift = 0.0f;
@@ -73,7 +74,10 @@ struct LayerColorDrawParams {
 
 static EditorState* gMaskRenderEditor = nullptr;
 static ImVec2 gMaskRenderImagePos;
+static ImVec2 gMaskRenderImageSize;
 static float gMaskRenderZoom = 1.0f;
+static bool gMaskRenderUseMeshes = true;
+static const std::vector<LayerMesh>* gMaskRenderMeshes = nullptr;
 static MaskRenderGlState gMaskRenderSavedState;
 static std::vector<LayerColorDrawParams> gLayerColorDrawParams;
 
@@ -346,12 +350,13 @@ static void DrawLayerColorAdjustCallback(const ImDrawList*, const ImDrawCmd* cmd
     std::vector<std::uint32_t> indices;
 
     if (params->deformMode) {
-        if (layer.mesh.vertices.empty() || layer.mesh.indices.empty()) {
+        const LayerMesh* renderMesh = params->renderMesh ? params->renderMesh : &layer.mesh;
+        if (renderMesh->vertices.empty() || renderMesh->indices.empty()) {
             return;
         }
 
-        vertices.reserve(layer.mesh.vertices.size() * 4u);
-        for (const MeshVertex& vertex : layer.mesh.vertices) {
+        vertices.reserve(renderMesh->vertices.size() * 4u);
+        for (const MeshVertex& vertex : renderMesh->vertices) {
             const ImVec2 screen = CanvasToScreenPoint(vertex.position, params->imagePos, params->zoom);
             vertices.push_back(screen.x);
             vertices.push_back(screen.y);
@@ -359,16 +364,16 @@ static void DrawLayerColorAdjustCallback(const ImDrawList*, const ImDrawCmd* cmd
             vertices.push_back(vertex.uv.y);
         }
 
-        indices.reserve(layer.mesh.indices.size());
-        for (std::size_t i = 0; i + 2u < layer.mesh.indices.size(); i += 3u) {
-            const std::uint32_t ia = layer.mesh.indices[i + 0u];
-            const std::uint32_t ib = layer.mesh.indices[i + 1u];
-            const std::uint32_t ic = layer.mesh.indices[i + 2u];
+        indices.reserve(renderMesh->indices.size());
+        for (std::size_t i = 0; i + 2u < renderMesh->indices.size(); i += 3u) {
+            const std::uint32_t ia = renderMesh->indices[i + 0u];
+            const std::uint32_t ib = renderMesh->indices[i + 1u];
+            const std::uint32_t ic = renderMesh->indices[i + 2u];
             if (
-                ia >= layer.mesh.vertices.size() ||
-                ib >= layer.mesh.vertices.size() ||
-                ic >= layer.mesh.vertices.size() ||
-                !MeshTriangleEdgesValid(layer.mesh, ia, ib, ic)
+                ia >= renderMesh->vertices.size() ||
+                ib >= renderMesh->vertices.size() ||
+                ic >= renderMesh->vertices.size() ||
+                !MeshTriangleEdgesValid(*renderMesh, ia, ib, ic)
             ) {
                 continue;
             }
@@ -471,12 +476,10 @@ static void RestoreMaskRenderGlState(const MaskRenderGlState& state) {
     glActiveTexture(state.activeTexture);
 }
 
-static void DrawMaskLayerToStencil(const EditorLayer& layer) {
+static void DrawMaskLayerToStencil(const EditorLayer& layer, int layerIndex) {
     if (
         !layer.visible ||
-        !layer.texture ||
-        layer.mesh.vertices.empty() ||
-        layer.mesh.indices.empty()
+        !layer.texture
     ) {
         return;
     }
@@ -487,33 +490,65 @@ static void DrawMaskLayerToStencil(const EditorLayer& layer) {
     }
 
     std::vector<float> vertices;
-    vertices.reserve(layer.mesh.vertices.size() * 4u);
-    for (const MeshVertex& vertex : layer.mesh.vertices) {
-        const ImVec2 screen = CanvasToScreenPoint(vertex.position, gMaskRenderImagePos, gMaskRenderZoom);
-        vertices.push_back(screen.x);
-        vertices.push_back(screen.y);
-        vertices.push_back(vertex.uv.x);
-        vertices.push_back(vertex.uv.y);
-    }
-
     std::vector<std::uint32_t> indices;
-    indices.reserve(layer.mesh.indices.size());
-    for (std::size_t i = 0; i + 2u < layer.mesh.indices.size(); i += 3u) {
-        const std::uint32_t ia = layer.mesh.indices[i + 0u];
-        const std::uint32_t ib = layer.mesh.indices[i + 1u];
-        const std::uint32_t ic = layer.mesh.indices[i + 2u];
+
+    if (gMaskRenderUseMeshes) {
+        const LayerMesh* renderMesh = &layer.mesh;
         if (
-            ia >= layer.mesh.vertices.size() ||
-            ib >= layer.mesh.vertices.size() ||
-            ic >= layer.mesh.vertices.size() ||
-            !MeshTriangleEdgesValid(layer.mesh, ia, ib, ic)
+            gMaskRenderMeshes &&
+            layerIndex >= 0 &&
+            layerIndex < static_cast<int>(gMaskRenderMeshes->size())
         ) {
-            continue;
+            renderMesh = &(*gMaskRenderMeshes)[static_cast<std::size_t>(layerIndex)];
         }
 
-        indices.push_back(ia);
-        indices.push_back(ib);
-        indices.push_back(ic);
+        if (
+            renderMesh->vertices.empty() ||
+            renderMesh->indices.empty()
+        ) {
+            return;
+        }
+
+        vertices.reserve(renderMesh->vertices.size() * 4u);
+        for (const MeshVertex& vertex : renderMesh->vertices) {
+            const ImVec2 screen = CanvasToScreenPoint(vertex.position, gMaskRenderImagePos, gMaskRenderZoom);
+            vertices.push_back(screen.x);
+            vertices.push_back(screen.y);
+            vertices.push_back(vertex.uv.x);
+            vertices.push_back(vertex.uv.y);
+        }
+
+        indices.reserve(renderMesh->indices.size());
+        for (std::size_t i = 0; i + 2u < renderMesh->indices.size(); i += 3u) {
+            const std::uint32_t ia = renderMesh->indices[i + 0u];
+            const std::uint32_t ib = renderMesh->indices[i + 1u];
+            const std::uint32_t ic = renderMesh->indices[i + 2u];
+            if (
+                ia >= renderMesh->vertices.size() ||
+                ib >= renderMesh->vertices.size() ||
+                ic >= renderMesh->vertices.size() ||
+                !MeshTriangleEdgesValid(*renderMesh, ia, ib, ic)
+            ) {
+                continue;
+            }
+
+            indices.push_back(ia);
+            indices.push_back(ib);
+            indices.push_back(ic);
+        }
+    } else {
+        const ImVec2 min = gMaskRenderImagePos;
+        const ImVec2 max(
+            gMaskRenderImagePos.x + gMaskRenderImageSize.x,
+            gMaskRenderImagePos.y + gMaskRenderImageSize.y
+        );
+        vertices = {
+            min.x, min.y, 0.0f, 0.0f,
+            max.x, min.y, 1.0f, 0.0f,
+            max.x, max.y, 1.0f, 1.0f,
+            min.x, max.y, 0.0f, 1.0f
+        };
+        indices = {0u, 1u, 2u, 0u, 2u, 3u};
     }
 
     if (indices.empty()) {
@@ -566,7 +601,7 @@ static void BeginMaskedLayerStencilCallback(const ImDrawList*, const ImDrawCmd* 
             continue;
         }
 
-        DrawMaskLayerToStencil(gMaskRenderEditor->document.layers[maskLayerIndex]);
+        DrawMaskLayerToStencil(gMaskRenderEditor->document.layers[maskLayerIndex], maskLayerIndex);
     }
 
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -609,14 +644,15 @@ static void DrawLayerTexture(
 static void DrawTexturedLayerMesh(
     ImDrawList* drawList,
     const EditorLayer& layer,
+    const LayerMesh& mesh,
     ImVec2 imagePos,
     float zoom,
     ImU32 tint
 ) {
     if (
         !layer.texture ||
-        layer.mesh.vertices.empty() ||
-        layer.mesh.indices.empty()
+        mesh.vertices.empty() ||
+        mesh.indices.empty()
     ) {
         return;
     }
@@ -647,7 +683,7 @@ static void DrawTexturedLayerMesh(
         }
 
         for (const std::uint32_t index : batch) {
-            const MeshVertex& vertex = layer.mesh.vertices[index];
+            const MeshVertex& vertex = mesh.vertices[index];
             drawList->PrimWriteVtx(
                 CanvasToScreenPoint(vertex.position, imagePos, zoom),
                 ImVec2(vertex.uv.x, vertex.uv.y),
@@ -660,16 +696,16 @@ static void DrawTexturedLayerMesh(
 
     drawList->PushTexture(ImTextureRef(textureId));
 
-    for (std::size_t i = 0; i + 2 < layer.mesh.indices.size(); i += 3) {
-        const std::uint32_t ia = layer.mesh.indices[i + 0u];
-        const std::uint32_t ib = layer.mesh.indices[i + 1u];
-        const std::uint32_t ic = layer.mesh.indices[i + 2u];
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const std::uint32_t ia = mesh.indices[i + 0u];
+        const std::uint32_t ib = mesh.indices[i + 1u];
+        const std::uint32_t ic = mesh.indices[i + 2u];
 
         if (
-            ia >= layer.mesh.vertices.size() ||
-            ib >= layer.mesh.vertices.size() ||
-            ic >= layer.mesh.vertices.size() ||
-            !MeshTriangleEdgesValid(layer.mesh, ia, ib, ic)
+            ia >= mesh.vertices.size() ||
+            ib >= mesh.vertices.size() ||
+            ic >= mesh.vertices.size() ||
+            !MeshTriangleEdgesValid(mesh, ia, ib, ic)
         ) {
             continue;
         }
@@ -700,6 +736,18 @@ static void DrawLayerWithGpuMasks(
     const bool hasColorAdjustment = LayerHasColorAdjustment(layer);
     const int opacityByte = static_cast<int>(std::round(std::clamp(layer.opacity, 0.0f, 1.0f) * 255.0f));
     const ImU32 tint = IM_COL32(opacityByte, opacityByte, opacityByte, opacityByte);
+    const LayerMesh* renderMesh = nullptr;
+    if (deformMode) {
+        renderMesh = &layer.mesh;
+        if (
+            gMaskRenderMeshes &&
+            layerIndex >= 0 &&
+            layerIndex < static_cast<int>(gMaskRenderMeshes->size())
+        ) {
+            renderMesh = &(*gMaskRenderMeshes)[static_cast<std::size_t>(layerIndex)];
+        }
+    }
+    gMaskRenderUseMeshes = deformMode;
     if (hasMasks) {
         drawList->AddCallback(
             BeginMaskedLayerStencilCallback,
@@ -714,6 +762,7 @@ static void DrawLayerWithGpuMasks(
             imageSize,
             zoom,
             deformMode,
+            renderMesh,
             layer.hueShift,
             layer.saturationScale,
             layer.lightnessShift,
@@ -723,7 +772,7 @@ static void DrawLayerWithGpuMasks(
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         drawList->AddCallback(SetPremultipliedAlphaBlendCallback, nullptr);
     } else if (deformMode) {
-        DrawTexturedLayerMesh(drawList, layer, imagePos, zoom, tint);
+        DrawTexturedLayerMesh(drawList, layer, *renderMesh, imagePos, zoom, tint);
     } else {
         DrawLayerTexture(drawList, layer, imagePos, imageSize, tint);
     }

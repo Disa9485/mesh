@@ -290,6 +290,7 @@ struct EditorState {
     bool meshSelectionMoved = false;
     Vec2 lastMeshDragCanvasPos;
     LayerHistoryState meshEditStartLayerState;
+    std::vector<LayerMesh> meshModeGuideMeshes;
     bool deformingVertices = false;
     bool deformVerticesMoved = false;
     LayerTransformMode deformTransformMode = LayerTransformMode::None;

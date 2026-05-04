@@ -310,8 +310,10 @@ static void DrawViewportControlPanel(EditorState& editor) {
     if (ImGui::RadioButton("Deform", mode == 0)) {
         editor.mode = EditorMode::Layer;
         ClearMeshSelection(editor);
+        editor.meshModeGuideMeshes.clear();
         editor.boxSelectingMesh = false;
         editor.draggingMeshSelection = false;
+        ApplyAllDeformParameters(editor);
     }
     ImGui::SameLine();
     if (ImGui::RadioButton("Mesh", mode == 1)) {
@@ -319,6 +321,12 @@ static void DrawViewportControlPanel(EditorState& editor) {
         editor.draggingLayer = false;
         editor.draggedLayer = -1;
         editor.layerTransformMode = LayerTransformMode::None;
+        editor.deformingVertices = false;
+        editor.deformVerticesMoved = false;
+        editor.deformTransformMode = LayerTransformMode::None;
+        editor.selectedDeformVertices.clear();
+        ApplyAllDeformParameters(editor);
+        CaptureMeshModeGuideMeshes(editor);
     }
 
     ImGui::SameLine();

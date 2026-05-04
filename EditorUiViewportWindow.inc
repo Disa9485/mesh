@@ -112,7 +112,13 @@ static void DrawViewport(EditorState& editor) {
         bool deformVertexInputConsumed = false;
         gMaskRenderEditor = &editor;
         gMaskRenderImagePos = imagePos;
+        gMaskRenderImageSize = imageSize;
         gMaskRenderZoom = editor.zoom;
+        gMaskRenderMeshes =
+            editor.mode == EditorMode::Mesh &&
+            editor.meshModeGuideMeshes.size() == editor.document.layers.size()
+                ? &editor.meshModeGuideMeshes
+                : nullptr;
 
         const bool snappingParameterForEdit = ContinueParameterEditSetpointSnap(editor);
 
@@ -330,7 +336,11 @@ static void DrawViewport(EditorState& editor) {
                 imagePos,
                 imageSize,
                 editor.zoom,
-                editor.mode == EditorMode::Layer
+                editor.mode == EditorMode::Layer ||
+                    (
+                        editor.mode == EditorMode::Mesh &&
+                        editor.meshModeGuideMeshes.size() == editor.document.layers.size()
+                    )
             );
         }
 
