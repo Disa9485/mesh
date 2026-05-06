@@ -31,6 +31,7 @@ inline float Len(const Vec2& v) {
 struct MeshVertex {
     Vec2 position;
     Vec2 uv;
+    bool physicsEnabled = false;
 };
 
 struct MeshEdge {
@@ -172,7 +173,8 @@ struct EditHistory {
 
 enum class EditorMode {
     Layer,
-    Mesh
+    Mesh,
+    View
 };
 
 enum class LayerTransformMode {
@@ -322,6 +324,7 @@ struct EditorState {
     double parameterSetpointDragStartTime = 0.0;
     bool parameterEditSnapActive = false;
     float parameterEditSnapTarget = 0.0f;
+    bool pasteAfterParameterEditSnap = false;
     std::vector<DeformParameter> parameterSetpointDragBefore;
     int parameterSetpointDragSelectedBefore = -1;
     bool showAddParameterTypePopup = false;

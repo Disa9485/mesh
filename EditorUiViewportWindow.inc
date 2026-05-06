@@ -337,6 +337,7 @@ static void DrawViewport(EditorState& editor) {
                 imageSize,
                 editor.zoom,
                 editor.mode == EditorMode::Layer ||
+                    editor.mode == EditorMode::View ||
                     (
                         editor.mode == EditorMode::Mesh &&
                         editor.meshModeGuideMeshes.size() == editor.document.layers.size()
@@ -475,12 +476,13 @@ static void DrawViewport(EditorState& editor) {
                     editor.mode == EditorMode::Layer;
                 const bool selectedVertex = showVertexSelection &&
                     ContainsIndex(editor.selectedVertices, static_cast<std::uint32_t>(i));
+                const ImU32 vertexColor = v.physicsEnabled
+                    ? (selectedVertex ? IM_COL32(255, 150, 40, 255) : IM_COL32(80, 150, 255, 255))
+                    : (selectedVertex ? IM_COL32(255, 230, 70, 255) : IM_COL32(70, 230, 130, 255));
                 drawList->AddCircleFilled(
                     vp,
                     selectedVertex ? 6.0f : 4.0f,
-                    showVertexSelection
-                        ? (selectedVertex ? IM_COL32(255, 230, 70, 255) : IM_COL32(70, 230, 130, 255))
-                        : IM_COL32(255, 220, 90, 255)
+                    showVertexSelection ? vertexColor : IM_COL32(255, 220, 90, 255)
                 );
             }
             }

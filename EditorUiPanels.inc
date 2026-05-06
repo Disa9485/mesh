@@ -1,9 +1,16 @@
 static void DrawLayerPanel(EditorState& editor) {
     ImGui::Begin("Layers");
+    const bool layerSelectionLocked = editor.mode == EditorMode::View;
+    const bool layerModificationLocked =
+        editor.mode == EditorMode::View ||
+        editor.mode == EditorMode::Mesh;
     int pendingDropInsertIndex = -1;
     bool didDropLayers = false;
 
     if (!editor.document.textures.empty()) {
+        if (layerModificationLocked) {
+            ImGui::BeginDisabled();
+        }
         if (ImGui::Button("Add")) {
             const int textureIndex = IsValidLayerIndex(editor, editor.selectedLayer)
                 ? std::max(0, editor.document.layers[editor.selectedLayer].textureIndex)
@@ -56,6 +63,9 @@ static void DrawLayerPanel(EditorState& editor) {
         if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
             ImGui::EndDisabled();
         }
+        if (layerModificationLocked) {
+            ImGui::EndDisabled();
+        }
     }
 
     ImGui::Separator();
@@ -65,8 +75,6 @@ static void DrawLayerPanel(EditorState& editor) {
         ImGui::End();
         return;
     }
-
-    ImGui::TextDisabled("Render order: 01 is front");
 
     auto drawDropLine = []() {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -82,7 +90,7 @@ static void DrawLayerPanel(EditorState& editor) {
 
     ImGui::PushID("drop_before_first");
     ImGui::InvisibleButton("##drop_before_first", ImVec2(ImGui::GetContentRegionAvail().x, 4.0f));
-    if (ImGui::BeginDragDropTarget()) {
+    if (!layerModificationLocked && ImGui::BeginDragDropTarget()) {
         if (ImGui::IsItemHovered()) {
             drawDropLine();
         }
@@ -107,7 +115,7 @@ static void DrawLayerPanel(EditorState& editor) {
         }
         ImGui::SameLine();
 
-        if (i <= 0) {
+        if (i <= 0 || layerModificationLocked) {
             ImGui::BeginDisabled();
         }
         if (ImGui::SmallButton("^")) {
@@ -116,13 +124,13 @@ static void DrawLayerPanel(EditorState& editor) {
             ImGui::PopID();
             break;
         }
-        if (i <= 0) {
+        if (i <= 0 || layerModificationLocked) {
             ImGui::EndDisabled();
         }
 
         ImGui::SameLine();
 
-        if (i + 1 >= static_cast<int>(editor.document.layers.size())) {
+        if (i + 1 >= static_cast<int>(editor.document.layers.size()) || layerModificationLocked) {
             ImGui::BeginDisabled();
         }
         if (ImGui::SmallButton("v")) {
@@ -131,13 +139,16 @@ static void DrawLayerPanel(EditorState& editor) {
             ImGui::PopID();
             break;
         }
-        if (i + 1 >= static_cast<int>(editor.document.layers.size())) {
+        if (i + 1 >= static_cast<int>(editor.document.layers.size()) || layerModificationLocked) {
             ImGui::EndDisabled();
         }
 
         ImGui::SameLine();
 
         const LayerHistoryState beforeVisibility = CaptureLayerHistoryState(layer);
+        if (layerModificationLocked) {
+            ImGui::BeginDisabled();
+        }
         if (ImGui::Checkbox("##visible", &layer.visible)) {
             if (!layer.visible) {
                 RemoveLayerFromSelection(editor, i);
@@ -151,6 +162,9 @@ static void DrawLayerPanel(EditorState& editor) {
                 "Change layer visibility"
             );
         }
+        if (layerModificationLocked) {
+            ImGui::EndDisabled();
+        }
         ImGui::SameLine();
 
         const float previewSize = 20.0f;
@@ -160,10 +174,16 @@ static void DrawLayerPanel(EditorState& editor) {
             ImGui::GetContentRegionAvail().x - previewSize - spacing
         );
         const bool selected = IsLayerSelected(editor, i);
-        if (ImGui::Selectable(layer.name.c_str(), selected, 0, ImVec2(selectableWidth, previewSize))) {
-            HandleLayerSelectionClick(editor, i);
+        const ImGuiSelectableFlags selectableFlags =
+            layerSelectionLocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None;
+        if (ImGui::Selectable(layer.name.c_str(), selected, selectableFlags, ImVec2(selectableWidth, previewSize))) {
+            if (editor.mode == EditorMode::Mesh) {
+                SelectSingleLayer(editor, i);
+            } else {
+                HandleLayerSelectionClick(editor, i);
+            }
         }
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+        if (!layerModificationLocked && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             if (!IsLayerSelected(editor, i)) {
                 SelectSingleLayer(editor, i);
             }
@@ -171,10 +191,12 @@ static void DrawLayerPanel(EditorState& editor) {
             ImGui::Text("%zu layer%s", editor.selectedLayers.size(), editor.selectedLayers.size() == 1u ? "" : "s");
             ImGui::EndDragDropSource();
         }
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        if (!layerModificationLocked && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
             ImGui::OpenPopup("Layer Data");
         }
-        DrawLayerDataPopup(editor, i);
+        if (!layerModificationLocked) {
+            DrawLayerDataPopup(editor, i);
+        }
 
         ImGui::SameLine();
         DrawLayerPreviewThumbnail(layer, previewSize);
@@ -185,7 +207,7 @@ static void DrawLayerPanel(EditorState& editor) {
         ImGui::PushID("drop_after");
         ImGui::PushID(i);
         ImGui::InvisibleButton("##drop_after", ImVec2(ImGui::GetContentRegionAvail().x, 4.0f));
-        if (ImGui::BeginDragDropTarget()) {
+        if (!layerModificationLocked && ImGui::BeginDragDropTarget()) {
             if (ImGui::IsItemHovered()) {
                 drawDropLine();
             }
@@ -255,6 +277,10 @@ static void DrawMeshGeneratorSettingsPanel(EditorState& editor) {
 
     ImGui::Begin("Mesh Generator Settings", &editor.showMeshGeneratorSettings);
 
+    if (editor.mode == EditorMode::View) {
+        ImGui::BeginDisabled();
+    }
+
     ImGui::SliderInt("Alpha Threshold", &editor.meshSettings.alphaThreshold, 0, 255);
     ImGui::SliderInt("Mesh Detail", &editor.meshSettings.meshDetail, 1, 5);
     ImGui::SliderInt(
@@ -298,6 +324,10 @@ static void DrawMeshGeneratorSettingsPanel(EditorState& editor) {
         20000
     );
 
+    if (editor.mode == EditorMode::View) {
+        ImGui::EndDisabled();
+    }
+
     ImGui::End();
 }
 
@@ -305,9 +335,25 @@ static void DrawViewportControlPanel(EditorState& editor) {
     ImGui::TextUnformatted("Edit Mode");
     ImGui::SameLine();
 
-    int mode = editor.mode == EditorMode::Mesh ? 1 : 0;
-
-    if (ImGui::RadioButton("Deform", mode == 0)) {
+    if (ImGui::RadioButton("View", editor.mode == EditorMode::View)) {
+        editor.mode = EditorMode::View;
+        editor.draggingLayer = false;
+        editor.draggedLayer = -1;
+        editor.layerTransformMode = LayerTransformMode::None;
+        editor.deformingVertices = false;
+        editor.deformVerticesMoved = false;
+        editor.deformTransformMode = LayerTransformMode::None;
+        editor.boxSelectingMesh = false;
+        editor.draggingMeshSelection = false;
+        editor.meshModeGuideMeshes.clear();
+        editor.selectedLayers.clear();
+        editor.selectedLayer = -1;
+        ClearAllVertexSelection(editor);
+        ClearParameterSetpointSelection(editor);
+        ApplyAllDeformParameters(editor);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Deform", editor.mode == EditorMode::Layer)) {
         editor.mode = EditorMode::Layer;
         ClearMeshSelection(editor);
         editor.meshModeGuideMeshes.clear();
@@ -316,7 +362,7 @@ static void DrawViewportControlPanel(EditorState& editor) {
         ApplyAllDeformParameters(editor);
     }
     ImGui::SameLine();
-    if (ImGui::RadioButton("Mesh", mode == 1)) {
+    if (ImGui::RadioButton("Mesh", editor.mode == EditorMode::Mesh)) {
         editor.mode = EditorMode::Mesh;
         editor.draggingLayer = false;
         editor.draggedLayer = -1;
@@ -325,11 +371,23 @@ static void DrawViewportControlPanel(EditorState& editor) {
         editor.deformVerticesMoved = false;
         editor.deformTransformMode = LayerTransformMode::None;
         editor.selectedDeformVertices.clear();
+        if (IsValidLayerIndex(editor, editor.selectedLayer)) {
+            SelectSingleLayer(editor, editor.selectedLayer);
+        } else {
+            editor.selectedLayers.clear();
+        }
+        ClearParameterSetpointSelection(editor);
         ApplyAllDeformParameters(editor);
         CaptureMeshModeGuideMeshes(editor);
     }
 
     ImGui::SameLine();
+
+    const bool editControlsLocked = editor.mode == EditorMode::View;
+
+    if (editControlsLocked) {
+        ImGui::BeginDisabled();
+    }
 
     const char* selectionType =
         editor.selectionDragShape == SelectionDragShape::Rectangle
@@ -342,7 +400,11 @@ static void DrawViewportControlPanel(EditorState& editor) {
                 : SelectionDragShape::Rectangle;
     }
 
-    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+    if (editControlsLocked) {
+        ImGui::EndDisabled();
+    }
+
+    if (!IsValidLayerIndex(editor, editor.selectedLayer) || editControlsLocked) {
         ImGui::BeginDisabled();
     }
 
@@ -356,19 +418,39 @@ static void DrawViewportControlPanel(EditorState& editor) {
         ResetMeshForLayers(editor, GetGenerateMeshTargetLayers(editor));
     }
 
-    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+    if (editor.mode == EditorMode::Mesh) {
+        ImGui::SameLine();
+        if (!HasToggleableSelectedMeshVertices(editor)) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Toggle Physics")) {
+            TogglePhysicsForSelectedMeshVertices(editor);
+        }
+        if (!HasToggleableSelectedMeshVertices(editor)) {
+            ImGui::EndDisabled();
+        }
+    }
+
+    if (!IsValidLayerIndex(editor, editor.selectedLayer) || editControlsLocked) {
         ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
 
+    if (editControlsLocked) {
+        ImGui::BeginDisabled();
+    }
     if (ImGui::Button("Mesh Generator Settings")) {
         editor.showMeshGeneratorSettings = true;
+    }
+    if (editControlsLocked) {
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
 
     const bool canAlignMeshes =
+        !editControlsLocked &&
         editor.document.layers.size() >= 2u &&
         !editor.parameters.empty();
     if (!canAlignMeshes) {
@@ -418,13 +500,14 @@ static void DrawHistoryPanel(EditorState& editor) {
     const bool hasHistory =
         !editor.history.undoStack.empty() ||
         !editor.history.redoStack.empty();
-    if (!hasHistory) {
+    const bool historyLocked = editor.mode == EditorMode::View;
+    if (!hasHistory || historyLocked) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button("Clear History")) {
         ClearHistoryFromUi(editor);
     }
-    if (!hasHistory) {
+    if (!hasHistory || historyLocked) {
         ImGui::EndDisabled();
     }
 
@@ -433,10 +516,19 @@ static void DrawHistoryPanel(EditorState& editor) {
     const std::size_t appliedCount = editor.history.undoStack.size();
     const std::size_t totalCount = editor.history.undoStack.size() + editor.history.redoStack.size();
 
+    if (historyLocked) {
+        ImGui::BeginDisabled();
+    }
     if (ImGui::Selectable("Initial state", appliedCount == 0u)) {
         SeekHistoryTo(editor, 0u);
+        if (historyLocked) {
+            ImGui::EndDisabled();
+        }
         ImGui::End();
         return;
+    }
+    if (historyLocked) {
+        ImGui::EndDisabled();
     }
 
     for (std::size_t i = 0; i < totalCount; ++i) {
@@ -451,10 +543,19 @@ static void DrawHistoryPanel(EditorState& editor) {
             label += " (redo)";
         }
 
+        if (historyLocked) {
+            ImGui::BeginDisabled();
+        }
         if (ImGui::Selectable(label.c_str(), appliedCount == i + 1u)) {
             SeekHistoryTo(editor, i + 1u);
+            if (historyLocked) {
+                ImGui::EndDisabled();
+            }
             ImGui::End();
             return;
+        }
+        if (historyLocked) {
+            ImGui::EndDisabled();
         }
     }
 

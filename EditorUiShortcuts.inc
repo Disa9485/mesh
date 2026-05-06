@@ -30,6 +30,16 @@ static void PasteCopiedDeformVertexPositions(EditorState& editor) {
         return;
     }
 
+    if (editor.parameterEditSnapActive) {
+        editor.pasteAfterParameterEditSnap = true;
+        return;
+    }
+
+    if (ActiveParameterNeedsSetpointSnapBeforeEdit(editor)) {
+        editor.pasteAfterParameterEditSnap = true;
+        return;
+    }
+
     std::vector<int> changedLayerIndices;
     std::vector<LayerHistoryState> beforeStates;
 
@@ -98,6 +108,12 @@ static void PasteCopiedDeformVertexPositions(EditorState& editor) {
 static void HandleEditorShortcuts(EditorState& editor) {
     const ImGuiIO& io = ImGui::GetIO();
 
+    if (editor.pasteAfterParameterEditSnap && !editor.parameterEditSnapActive) {
+        editor.pasteAfterParameterEditSnap = false;
+        PasteCopiedDeformVertexPositions(editor);
+        return;
+    }
+
     if (
         editor.draggingLayer ||
         editor.draggingMeshSelection ||
@@ -140,7 +156,12 @@ static void HandleEditorShortcuts(EditorState& editor) {
         return;
     }
 
+    if (editor.mode == EditorMode::View) {
+        return;
+    }
+
     if (
+        editor.mode == EditorMode::Layer &&
         editor.selectedParameterSetpointParameter >= 0 &&
         ImGui::IsKeyPressed(ImGuiKey_Delete, false)
     ) {

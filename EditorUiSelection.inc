@@ -54,6 +54,7 @@ static void ClearParameterSetpointSelection(EditorState& editor) {
     editor.parameterSetpointDragStartTime = 0.0;
     editor.parameterEditSnapActive = false;
     editor.parameterEditSnapTarget = 0.0f;
+    editor.pasteAfterParameterEditSnap = false;
     editor.parameterSetpointDragBefore.clear();
     editor.parameterSetpointDragSelectedBefore = -1;
 }
@@ -1030,6 +1031,64 @@ static std::vector<int> MakeIdentityVertexRemap(std::size_t vertexCount) {
         oldToNew[i] = static_cast<int>(i);
     }
     return oldToNew;
+}
+
+static bool HasToggleableSelectedMeshVertices(const EditorState& editor) {
+    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+        return false;
+    }
+
+    const EditorLayer& layer = editor.document.layers[editor.selectedLayer];
+    for (const std::uint32_t vertex : editor.selectedVertices) {
+        if (vertex < layer.mesh.vertices.size()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void TogglePhysicsForSelectedMeshVertices(EditorState& editor) {
+    if (!IsValidLayerIndex(editor, editor.selectedLayer)) {
+        return;
+    }
+
+    EditorLayer& layer = editor.document.layers[editor.selectedLayer];
+    if (!HasToggleableSelectedMeshVertices(editor)) {
+        editor.statusText = "Select one or more mesh vertices first.";
+        return;
+    }
+
+    bool allSelectedVerticesHavePhysics = true;
+    for (const std::uint32_t vertex : editor.selectedVertices) {
+        if (vertex >= layer.mesh.vertices.size()) {
+            continue;
+        }
+
+        if (!layer.mesh.vertices[vertex].physicsEnabled) {
+            allSelectedVerticesHavePhysics = false;
+            break;
+        }
+    }
+
+    const bool newPhysicsState = !allSelectedVerticesHavePhysics;
+    const LayerHistoryState before = CaptureLayerHistoryState(layer);
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+    const std::vector<int> oldToNewVertex = MakeIdentityVertexRemap(layer.mesh.vertices.size());
+
+    for (const std::uint32_t vertex : editor.selectedVertices) {
+        if (vertex < layer.mesh.vertices.size()) {
+            layer.mesh.vertices[vertex].physicsEnabled = newPhysicsState;
+        }
+    }
+
+    ReconcileParameterMeshesAfterMeshEdit(editor, editor.selectedLayer, oldToNewVertex);
+    PushMeshEditOperationWithParameters(
+        editor,
+        before,
+        parametersBefore,
+        newPhysicsState ? "Enable vertex physics" : "Disable vertex physics"
+    );
 }
 
 static void AddVertexAtCanvasPoint(EditorState& editor, Vec2 canvasPoint, bool connectToSelection) {

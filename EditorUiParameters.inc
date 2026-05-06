@@ -1419,6 +1419,248 @@ static void EnsureMultilinearMeshCornersForAllLayers(EditorState& editor) {
     }
 }
 
+static LayerMesh BuildAdditiveSeedMeshForMultilinearCornerValues(
+    const EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues
+) {
+    LayerMesh seedMesh = editor.document.layers[layerIndex].mesh;
+    const DeformParameterLayerState* baseState = nullptr;
+    for (const int parameterIndex : parameterIndices) {
+        const DeformParameterLayerState* state =
+            FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
+        if (state) {
+            baseState = state;
+            break;
+        }
+    }
+
+    if (!baseState || !MeshTopologyMatches(seedMesh, baseState->meshAt0)) {
+        return seedMesh;
+    }
+
+    seedMesh = EvaluateLayerSetpoint(*baseState, 0.0f).mesh;
+    for (std::size_t parameterOffset = 0; parameterOffset < parameterIndices.size(); ++parameterOffset) {
+        const int parameterIndex = parameterIndices[parameterOffset];
+        const DeformParameterLayerState* state =
+            FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
+        if (!state) {
+            continue;
+        }
+
+        const DeformParameterLayerSetpoint baseSetpoint = EvaluateLayerSetpoint(*state, 0.0f);
+        const DeformParameterLayerSetpoint evaluatedSetpoint =
+            EvaluateLayerSetpoint(*state, cornerValues[parameterOffset]);
+        if (
+            !MeshTopologyMatches(seedMesh, baseSetpoint.mesh) ||
+            !MeshTopologyMatches(seedMesh, evaluatedSetpoint.mesh)
+        ) {
+            continue;
+        }
+
+        for (std::size_t vertexIndex = 0; vertexIndex < seedMesh.vertices.size(); ++vertexIndex) {
+            seedMesh.vertices[vertexIndex].position.x +=
+                evaluatedSetpoint.mesh.vertices[vertexIndex].position.x -
+                baseSetpoint.mesh.vertices[vertexIndex].position.x;
+            seedMesh.vertices[vertexIndex].position.y +=
+                evaluatedSetpoint.mesh.vertices[vertexIndex].position.y -
+                baseSetpoint.mesh.vertices[vertexIndex].position.y;
+        }
+    }
+
+    return seedMesh;
+}
+
+static bool FindNeighborSetpointValuesExcludingValue(
+    const DeformParameter& parameter,
+    float value,
+    float& lower,
+    float& upper
+) {
+    std::vector<float> values = CollectParameterSetpointValues(parameter);
+    values.erase(
+        std::remove_if(
+            values.begin(),
+            values.end(),
+            [&](float setpoint) {
+                return NearlyEqualSetpointValue(setpoint, value);
+            }
+        ),
+        values.end()
+    );
+
+    if (values.empty()) {
+        return false;
+    }
+
+    std::sort(values.begin(), values.end());
+    lower = values.front();
+    upper = values.back();
+    for (const float setpoint : values) {
+        if (setpoint <= value) {
+            lower = setpoint;
+        }
+        if (setpoint >= value) {
+            upper = setpoint;
+            break;
+        }
+    }
+
+    return true;
+}
+
+static bool TryBuildInsertedParameterSliceCornerMesh(
+    const EditorState& editor,
+    int layerIndex,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues,
+    int changedParameterIndex,
+    float changedParameterValue,
+    LayerMesh& mesh
+) {
+    const auto changedIt = std::find(
+        parameterIndices.begin(),
+        parameterIndices.end(),
+        changedParameterIndex
+    );
+    if (changedIt == parameterIndices.end()) {
+        return false;
+    }
+
+    const std::size_t changedOffset =
+        static_cast<std::size_t>(std::distance(parameterIndices.begin(), changedIt));
+    if (
+        changedOffset >= cornerValues.size() ||
+        changedParameterIndex < 0 ||
+        changedParameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        !NearlyEqualSetpointValue(cornerValues[changedOffset], changedParameterValue)
+    ) {
+        return false;
+    }
+
+    float lowerValue = 0.0f;
+    float upperValue = 1.0f;
+    if (!FindNeighborSetpointValuesExcludingValue(
+        editor.parameters[changedParameterIndex],
+        changedParameterValue,
+        lowerValue,
+        upperValue
+    )) {
+        return false;
+    }
+
+    std::vector<float> lowerCornerValues = cornerValues;
+    std::vector<float> upperCornerValues = cornerValues;
+    lowerCornerValues[changedOffset] = lowerValue;
+    upperCornerValues[changedOffset] = upperValue;
+
+    LayerMesh lowerMesh = BuildSeedMeshForMultilinearCornerValues(
+        editor,
+        layerIndex,
+        parameterIndices,
+        lowerCornerValues
+    );
+    LayerMesh upperMesh = BuildSeedMeshForMultilinearCornerValues(
+        editor,
+        layerIndex,
+        parameterIndices,
+        upperCornerValues
+    );
+
+    if (!MeshTopologyMatches(lowerMesh, upperMesh)) {
+        return false;
+    }
+
+    const float t = NearlyEqualSetpointValue(lowerValue, upperValue)
+        ? 0.0f
+        : std::clamp(
+            (changedParameterValue - lowerValue) / (upperValue - lowerValue),
+            0.0f,
+            1.0f
+        );
+
+    mesh = lowerMesh;
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        mesh.vertices[i].position.x =
+            lowerMesh.vertices[i].position.x +
+            (upperMesh.vertices[i].position.x - lowerMesh.vertices[i].position.x) * t;
+        mesh.vertices[i].position.y =
+            lowerMesh.vertices[i].position.y +
+            (upperMesh.vertices[i].position.y - lowerMesh.vertices[i].position.y) * t;
+    }
+
+    return true;
+}
+
+static void RebuildMultilinearMeshCornersForParameterValue(
+    EditorState& editor,
+    int layerIndex,
+    int changedParameterIndex,
+    float changedParameterValue
+) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
+        return;
+    }
+
+    const std::vector<int> parameterIndices = CollectMeshParametersForLayer(editor, layerIndex);
+    if (parameterIndices.size() < 2u || parameterIndices.size() > 12u) {
+        return;
+    }
+
+    const auto changedIt = std::find(
+        parameterIndices.begin(),
+        parameterIndices.end(),
+        changedParameterIndex
+    );
+    if (changedIt == parameterIndices.end()) {
+        return;
+    }
+
+    const std::size_t changedOffset =
+        static_cast<std::size_t>(std::distance(parameterIndices.begin(), changedIt));
+    std::vector<std::vector<float>> combinations;
+    CollectMultilinearCornerValueCombinations(editor, parameterIndices, combinations);
+    if (combinations.empty()) {
+        return;
+    }
+
+    for (std::vector<float>& cornerValues : combinations) {
+        if (
+            changedOffset >= cornerValues.size() ||
+            !NearlyEqualSetpointValue(cornerValues[changedOffset], changedParameterValue)
+        ) {
+            continue;
+        }
+
+        LayerMesh seedMesh;
+        if (!TryBuildInsertedParameterSliceCornerMesh(
+            editor,
+            layerIndex,
+            parameterIndices,
+            cornerValues,
+            changedParameterIndex,
+            changedParameterValue,
+            seedMesh
+        )) {
+            seedMesh = BuildAdditiveSeedMeshForMultilinearCornerValues(
+                editor,
+                layerIndex,
+                parameterIndices,
+                cornerValues
+            );
+        }
+
+        for (const int parameterIndex : parameterIndices) {
+            DeformParameterLayerState* state =
+                FindParameterLayerState(editor.parameters[parameterIndex], layerIndex);
+            if (state) {
+                StoreMeshCornerForState(*state, parameterIndices, cornerValues, seedMesh);
+            }
+        }
+    }
+}
+
 static void EnsureCurrentMeshSetpointsForSharedCorner(
     EditorState& editor,
     int layerIndex,
@@ -1965,6 +2207,60 @@ static void DeleteParameterState(EditorState& editor, int parameterIndex, int st
     ApplyAllDeformParameters(editor);
 }
 
+static void MoveParameterState(EditorState& editor, int parameterIndex, int stateIndex, int direction) {
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        !IsStateParameter(editor.parameters[parameterIndex])
+    ) {
+        return;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    const int targetIndex = stateIndex + direction;
+    if (
+        stateIndex < 0 ||
+        targetIndex < 0 ||
+        stateIndex >= static_cast<int>(parameter.stateNames.size()) ||
+        targetIndex >= static_cast<int>(parameter.stateNames.size())
+    ) {
+        return;
+    }
+
+    const std::vector<DeformParameter> before = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+
+    std::swap(parameter.stateNames[stateIndex], parameter.stateNames[targetIndex]);
+    for (DeformParameterLayerState& state : parameter.layers) {
+        for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+            if (NearlyEqualSetpointValue(setpoint.value, static_cast<float>(stateIndex))) {
+                setpoint.value = static_cast<float>(targetIndex);
+            } else if (NearlyEqualSetpointValue(setpoint.value, static_cast<float>(targetIndex))) {
+                setpoint.value = static_cast<float>(stateIndex);
+            }
+        }
+        SortParameterSetpoints(state);
+    }
+
+    if (parameter.selectedState == stateIndex) {
+        parameter.selectedState = targetIndex;
+    } else if (parameter.selectedState == targetIndex) {
+        parameter.selectedState = stateIndex;
+    }
+    parameter.value = static_cast<float>(parameter.selectedState);
+    editor.selectedParameter = parameterIndex;
+
+    PushParameterOperation(
+        editor,
+        before,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Reorder parameter states"
+    );
+    ApplyAllDeformParameters(editor);
+}
+
 static bool ParameterHasLayer(const DeformParameter& parameter, int layerIndex) {
     return std::any_of(
         parameter.layers.begin(),
@@ -2153,6 +2449,83 @@ static void UpdateActiveParameterEndpointForLayers(
 
     const bool updateZero = !IsStateParameter(parameter) && effectiveSetpointValue <= 0.001f;
     const bool updateOne = !IsStateParameter(parameter) && effectiveSetpointValue >= 0.999f;
+    bool seedMissingCustomSetpoints =
+        !IsStateParameter(parameter) &&
+        !updateZero &&
+        !updateOne;
+    if (seedMissingCustomSetpoints) {
+        seedMissingCustomSetpoints = std::any_of(
+            parameter.layers.begin(),
+            parameter.layers.end(),
+            [&](const DeformParameterLayerState& state) {
+                return !FindLayerSetpointAtValue(state, effectiveSetpointValue);
+            }
+        );
+    }
+
+    if (seedMissingCustomSetpoints) {
+        for (DeformParameterLayerState& state : parameter.layers) {
+            if (!IsValidLayerIndex(editor, state.layerIndex)) {
+                continue;
+            }
+
+            EnsureStateParameterLayerSetpoints(parameter, state);
+            if (FindLayerSetpointAtValue(state, effectiveSetpointValue)) {
+                continue;
+            }
+
+            DeformParameterLayerSetpoint seed = EvaluateLayerSetpoint(state, effectiveSetpointValue);
+            seed.value = effectiveSetpointValue;
+            if (parameter.affectsMesh) {
+                seed.mesh = MeshWithoutOtherParameterDeltas(
+                    editor,
+                    editor.selectedParameter,
+                    state.layerIndex,
+                    editor.document.layers[state.layerIndex].mesh
+                );
+            }
+            if (parameter.affectsOpacity) {
+                seed.opacity = OpacityWithoutOtherParameterDeltas(
+                    editor,
+                    editor.selectedParameter,
+                    state.layerIndex,
+                    editor.document.layers[state.layerIndex].opacity
+                );
+            }
+            if (parameter.affectsTexture) {
+                seed.textureIndex = editor.document.layers[state.layerIndex].textureIndex;
+            }
+            if (parameter.affectsColor) {
+                seed.hueShift = editor.document.layers[state.layerIndex].hueShift;
+                seed.saturationScale = editor.document.layers[state.layerIndex].saturationScale;
+                seed.lightnessShift = editor.document.layers[state.layerIndex].lightnessShift;
+            }
+            if (parameter.affectsRenderOrder) {
+                seed.renderOrderOverride = editor.document.layers[state.layerIndex].renderOrderOverride;
+            }
+            if (parameter.affectsMasking) {
+                seed.maskLayerIndices = editor.document.layers[state.layerIndex].maskLayerIndices;
+            }
+            UpsertLayerSetpoint(state, seed);
+        }
+
+        if (parameter.affectsMesh) {
+            for (const DeformParameterLayerState& state : parameter.layers) {
+                RebuildMultilinearMeshCornersForParameterValue(
+                    editor,
+                    state.layerIndex,
+                    editor.selectedParameter,
+                    effectiveSetpointValue
+                );
+                StoreCurrentMeshCornerForLayer(
+                    editor,
+                    state.layerIndex,
+                    editor.document.layers[state.layerIndex].mesh
+                );
+                EnsureMultilinearMeshCornersForLayer(editor, state.layerIndex);
+            }
+        }
+    }
 
     for (DeformParameterLayerState& parameterLayerState : parameter.layers) {
         const int layerIndex = parameterLayerState.layerIndex;
@@ -2256,7 +2629,9 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
     EditorState& editor,
     int parameterIndex,
     const std::vector<float>& setpoints,
-    float& value
+    float& value,
+    bool allowSetpointEditing = true,
+    bool allowSetpointSnap = true
 ) {
     const ImVec2 sliderMin = ImGui::GetItemRectMin();
     const ImVec2 sliderMax = ImGui::GetItemRectMax();
@@ -2298,6 +2673,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
     };
 
     if (
+        allowSetpointEditing &&
         editor.selectedParameterSetpointParameter == parameterIndex &&
         editor.pendingParameterSetpointDrag &&
         ImGui::IsMouseDown(ImGuiMouseButton_Right)
@@ -2313,6 +2689,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
     }
 
     if (
+        allowSetpointEditing &&
         editor.selectedParameterSetpointParameter == parameterIndex &&
         editor.draggingParameterSetpoint &&
         ImGui::IsMouseDown(ImGuiMouseButton_Right)
@@ -2335,6 +2712,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
     }
 
     if (
+        allowSetpointEditing &&
         editor.selectedParameterSetpointParameter == parameterIndex &&
         (editor.draggingParameterSetpoint || editor.pendingParameterSetpointDrag) &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Right)
@@ -2358,7 +2736,11 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
         editor.parameterSetpointDragSelectedBefore = -1;
     }
 
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && mouseIsNearSlider()) {
+    if (
+        allowSetpointSnap &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+        mouseIsNearSlider()
+    ) {
         bool foundSetpoint = false;
         float nearestSetpoint = 0.0f;
         float nearestDistance = snapRadius;
@@ -2373,20 +2755,24 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
         }
 
         if (foundSetpoint) {
-            ClearAllVertexSelection(editor);
-            editor.selectedLayers.clear();
-            editor.selectedLayer = -1;
             editor.selectedParameter = parameterIndex;
-            editor.selectedParameterSetpointParameter = parameterIndex;
-            editor.selectedParameterSetpointValue = nearestSetpoint;
-            editor.draggingParameterSetpoint = false;
-            editor.pendingParameterSetpointDrag = !IsEndpointSetpointValue(nearestSetpoint);
-            if (editor.pendingParameterSetpointDrag) {
-                editor.parameterSetpointDragStartMouseX = io.MousePos.x;
-                editor.parameterSetpointDragStartValue = nearestSetpoint;
-                editor.parameterSetpointDragStartTime = ImGui::GetTime();
-                editor.parameterSetpointDragBefore = editor.parameters;
-                editor.parameterSetpointDragSelectedBefore = editor.selectedParameter;
+            if (allowSetpointEditing) {
+                ClearAllVertexSelection(editor);
+                editor.selectedLayers.clear();
+                editor.selectedLayer = -1;
+                editor.selectedParameterSetpointParameter = parameterIndex;
+                editor.selectedParameterSetpointValue = nearestSetpoint;
+                editor.draggingParameterSetpoint = false;
+                editor.pendingParameterSetpointDrag = !IsEndpointSetpointValue(nearestSetpoint);
+                if (editor.pendingParameterSetpointDrag) {
+                    editor.parameterSetpointDragStartMouseX = io.MousePos.x;
+                    editor.parameterSetpointDragStartValue = nearestSetpoint;
+                    editor.parameterSetpointDragStartTime = ImGui::GetTime();
+                    editor.parameterSetpointDragBefore = editor.parameters;
+                    editor.parameterSetpointDragSelectedBefore = editor.selectedParameter;
+                }
+            } else {
+                ClearParameterSetpointSelection(editor);
             }
             value = nearestSetpoint;
             return true;
@@ -2546,21 +2932,22 @@ static void DrawDeformParametersPanel(EditorState& editor) {
     ImGui::Begin("Parameters");
 
     const bool parametersFrozen = editor.mode == EditorMode::Mesh;
-    if (parametersFrozen) {
-        ImGui::TextDisabled("Frozen in Mesh mode.");
-    }
+    const bool parameterEditingLocked =
+        editor.mode == EditorMode::View ||
+        editor.mode == EditorMode::Mesh;
+    const bool parameterSelectionLocked = parameterEditingLocked;
 
-    if (editor.selectedLayers.empty()) {
+    if (editor.selectedLayers.empty() || parameterEditingLocked) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button("Add")) {
         ImGui::OpenPopup("Add Parameter Type");
     }
-    if (editor.selectedLayers.empty()) {
+    if (editor.selectedLayers.empty() || parameterEditingLocked) {
         ImGui::EndDisabled();
     }
 
-    if (ImGui::BeginPopupModal("Add Parameter Type", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (!parameterEditingLocked && ImGui::BeginPopupModal("Add Parameter Type", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (ImGui::Button("Slider", ImVec2(160.0f, 0.0f))) {
             AddDeformParameter(editor, DeformParameterType::Slider);
             ImGui::CloseCurrentPopup();
@@ -2578,6 +2965,7 @@ static void DrawDeformParametersPanel(EditorState& editor) {
     ImGui::SameLine();
 
     const bool canDelete =
+        !parameterEditingLocked &&
         editor.selectedParameter >= 0 &&
         editor.selectedParameter < static_cast<int>(editor.parameters.size());
     if (!canDelete) {
@@ -2603,13 +2991,47 @@ static void DrawDeformParametersPanel(EditorState& editor) {
         ImGui::PushID(i);
 
         const bool selected = editor.selectedParameter == i;
-        if (ImGui::Selectable(parameter.name.c_str(), selected)) {
-            if (editor.selectedParameterSetpointParameter != i) {
+        const bool displaySelected = selected && !parameterSelectionLocked;
+        const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+        const float rowWidth = ImGui::GetContentRegionAvail().x;
+        const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+        const ImGuiSelectableFlags parameterRowFlags =
+            parameterSelectionLocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None;
+        if (
+            ImGui::Selectable(
+                "##parameter_row",
+                displaySelected,
+                parameterRowFlags,
+                ImVec2(rowWidth, rowHeight)
+            )
+        ) {
+            if (editor.selectedParameterSetpointParameter != i || parameterEditingLocked) {
                 ClearParameterSetpointSelection(editor);
             }
             editor.selectedParameter = i;
         }
-        if (ImGui::BeginPopupContextItem("parameter_options")) {
+
+        ImDrawList* rowDrawList = ImGui::GetWindowDrawList();
+        const ImU32 textColor = ImGui::GetColorU32(ImGuiCol_Text);
+        const std::string layerCount =
+            std::to_string(parameter.layers.size()) +
+            (parameter.layers.size() == 1u ? " layer" : " layers");
+        const ImVec2 countSize = ImGui::CalcTextSize(layerCount.c_str());
+        rowDrawList->AddText(
+            ImVec2(rowStart.x, rowStart.y + ImGui::GetStyle().FramePadding.y),
+            textColor,
+            parameter.name.c_str()
+        );
+        rowDrawList->AddText(
+            ImVec2(
+                rowStart.x + std::max(0.0f, rowWidth - countSize.x),
+                rowStart.y + ImGui::GetStyle().FramePadding.y
+            ),
+            textColor,
+            layerCount.c_str()
+        );
+
+        if (!parameterEditingLocked && ImGui::BeginPopupContextItem("parameter_options")) {
             editor.selectedParameter = i;
             char nameBuffer[128] = {};
             std::strncpy(nameBuffer, parameter.name.c_str(), sizeof(nameBuffer) - 1u);
@@ -2747,19 +3169,48 @@ static void DrawDeformParametersPanel(EditorState& editor) {
         if (IsStateParameter(parameter)) {
             EnsureStateParameterDefaults(parameter);
             const char* preview = parameter.stateNames[static_cast<std::size_t>(parameter.selectedState)].c_str();
+            bool requestAddParameterState = false;
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::BeginCombo("##state", preview)) {
-                ImGui::BeginChild("states", ImVec2(0.0f, 180.0f), ImGuiChildFlags_Borders);
                 for (int stateIndex = 0; stateIndex < static_cast<int>(parameter.stateNames.size()); ++stateIndex) {
                     ImGui::PushID(stateIndex);
                     const bool stateSelected = stateIndex == parameter.selectedState;
+                    const bool canMoveUp = !parameterEditingLocked && stateIndex > 0;
+                    const bool canMoveDown =
+                        !parameterEditingLocked &&
+                        stateIndex + 1 < static_cast<int>(parameter.stateNames.size());
+                    if (!canMoveUp) {
+                        ImGui::BeginDisabled();
+                    }
+                    if (ImGui::SmallButton("^")) {
+                        MoveParameterState(editor, i, stateIndex, -1);
+                        ImGui::PopID();
+                        break;
+                    }
+                    if (!canMoveUp) {
+                        ImGui::EndDisabled();
+                    }
+                    ImGui::SameLine();
+                    if (!canMoveDown) {
+                        ImGui::BeginDisabled();
+                    }
+                    if (ImGui::SmallButton("v")) {
+                        MoveParameterState(editor, i, stateIndex, 1);
+                        ImGui::PopID();
+                        break;
+                    }
+                    if (!canMoveDown) {
+                        ImGui::EndDisabled();
+                    }
+                    ImGui::SameLine();
                     if (ImGui::Selectable(parameter.stateNames[stateIndex].c_str(), stateSelected)) {
                         parameter.selectedState = stateIndex;
                         parameter.value = static_cast<float>(stateIndex);
                         editor.selectedParameter = i;
+                        ClearParameterSetpointSelection(editor);
                         ApplyAllDeformParameters(editor);
                     }
-                    if (ImGui::BeginPopupContextItem("state_options")) {
+                    if (!parameterEditingLocked && ImGui::BeginPopupContextItem("state_options")) {
                         char stateNameBuffer[128] = {};
                         std::strncpy(stateNameBuffer, parameter.stateNames[stateIndex].c_str(), sizeof(stateNameBuffer) - 1u);
                         ImGui::SetNextItemWidth(220.0f);
@@ -2784,8 +3235,8 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                     }
                     ImGui::PopID();
                 }
-                ImGui::EndChild();
-                if (ImGui::Button("Add State +")) {
+
+                if (!parameterEditingLocked && ImGui::Selectable("Add Item +", false)) {
                     editor.addParameterStateTarget = i;
                     std::snprintf(
                         editor.addParameterStateName,
@@ -2793,21 +3244,25 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                         "State %d",
                         static_cast<int>(parameter.stateNames.size()) + 1
                     );
-                    ImGui::OpenPopup("Add Parameter State");
-                }
-                if (ImGui::BeginPopupModal("Add Parameter State", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                    ImGui::InputText("Name", editor.addParameterStateName, sizeof(editor.addParameterStateName));
-                    if (ImGui::Button("OK")) {
-                        AddStateToParameter(editor, editor.addParameterStateTarget, editor.addParameterStateName);
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel")) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
+                    requestAddParameterState = true;
+                    ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndCombo();
+            }
+            if (requestAddParameterState) {
+                ImGui::OpenPopup("Add Parameter State");
+            }
+            if (!parameterEditingLocked && ImGui::BeginPopupModal("Add Parameter State", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::InputText("Name", editor.addParameterStateName, sizeof(editor.addParameterStateName));
+                if (ImGui::Button("OK")) {
+                    AddStateToParameter(editor, editor.addParameterStateTarget, editor.addParameterStateName);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
             }
         } else {
             ImGui::SetNextItemWidth(-1.0f);
@@ -2824,7 +3279,9 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                 editor,
                 i,
                 CollectParameterSetpointValues(parameter),
-                value
+                value,
+                !parameterEditingLocked,
+                editor.mode != EditorMode::Mesh
             );
             const bool setpointSelectedForThisParameter =
                 editor.selectedParameterSetpointParameter == i &&
@@ -2844,13 +3301,6 @@ static void DrawDeformParametersPanel(EditorState& editor) {
 
         if (parametersFrozen) {
             ImGui::EndDisabled();
-        }
-
-        if (selected) {
-            ImGui::TextDisabled("%zu layer%s",
-                parameter.layers.size(),
-                parameter.layers.size() == 1u ? "" : "s"
-            );
         }
 
         ImGui::PopID();

@@ -701,6 +701,14 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
         return;
     }
 
+    auto snapParameterBeforeLayerEdit = [&]() -> bool {
+        if (editor.parameterEditSnapActive) {
+            return true;
+        }
+
+        return ActiveParameterNeedsSetpointSnapBeforeEdit(editor);
+    };
+
     ImGui::TextWrapped("%s", layer.name.c_str());
     ImGui::Separator();
 
@@ -729,6 +737,11 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
     ImGui::SetNextItemWidth(180.0f);
     float opacity = layer.opacity;
     if (ImGui::SliderFloat("Opacity", &opacity, 0.0f, 1.0f, "%.2f")) {
+        if (snapParameterBeforeLayerEdit()) {
+            ImGui::EndPopup();
+            return;
+        }
+
         const std::vector<DeformParameter> parametersBefore = editor.parameters;
         const LayerHistoryState before = CaptureLayerHistoryState(layer);
         layer.opacity = std::clamp(opacity, 0.0f, 1.0f);
@@ -770,15 +783,27 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
             ImGui::TextWrapped("%s", colorLayer.name.c_str());
             ImGui::SetNextItemWidth(320.0f);
             if (ImGui::SliderFloat("Hue", &editor.colorDialogHue, -100.0f, 100.0f, "%.0f")) {
-                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                if (snapParameterBeforeLayerEdit()) {
+                    editor.colorDialogHue = colorLayer.hueShift;
+                } else {
+                    colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                }
             }
             ImGui::SetNextItemWidth(320.0f);
             if (ImGui::SliderFloat("Saturation", &editor.colorDialogSaturation, 0.0f, 200.0f, "%.0f")) {
-                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                if (snapParameterBeforeLayerEdit()) {
+                    editor.colorDialogSaturation = colorLayer.saturationScale;
+                } else {
+                    colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                }
             }
             ImGui::SetNextItemWidth(320.0f);
             if (ImGui::SliderFloat("Lightness", &editor.colorDialogLightness, -100.0f, 100.0f, "%.0f")) {
-                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                if (snapParameterBeforeLayerEdit()) {
+                    editor.colorDialogLightness = colorLayer.lightnessShift;
+                } else {
+                    colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                }
             }
 
             if (ImGui::Button("Copy")) {
@@ -792,12 +817,14 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
                 ImGui::BeginDisabled();
             }
             if (ImGui::Button("Paste")) {
-                editor.colorDialogHue = editor.colorClipboardHue;
-                editor.colorDialogSaturation = editor.colorClipboardSaturation;
-                editor.colorDialogLightness = editor.colorClipboardLightness;
-                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
-                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
-                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                if (!snapParameterBeforeLayerEdit()) {
+                    editor.colorDialogHue = editor.colorClipboardHue;
+                    editor.colorDialogSaturation = editor.colorClipboardSaturation;
+                    editor.colorDialogLightness = editor.colorClipboardLightness;
+                    colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                    colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                    colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                }
             }
             if (!editor.hasLayerColorClipboard) {
                 ImGui::EndDisabled();
@@ -805,25 +832,27 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
 
             ImGui::Separator();
             if (ImGui::Button("Confirm")) {
-                const std::vector<DeformParameter> parametersBefore = editor.parameters;
-                LayerHistoryState before = CaptureLayerHistoryState(colorLayer);
-                before.hueShift = editor.colorDialogOriginalHue;
-                before.saturationScale = editor.colorDialogOriginalSaturation;
-                before.lightnessShift = editor.colorDialogOriginalLightness;
-                colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
-                colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
-                colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
-                UpdateActiveParameterEndpointForLayers(editor, std::vector<int>{editor.colorDialogLayer});
-                PushLayerOperationWithParameters(
-                    editor,
-                    editor.colorDialogLayer,
-                    before,
-                    CaptureLayerHistoryState(colorLayer),
-                    parametersBefore,
-                    editor.parameters,
-                    "Change layer color"
-                );
-                ImGui::CloseCurrentPopup();
+                if (!snapParameterBeforeLayerEdit()) {
+                    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+                    LayerHistoryState before = CaptureLayerHistoryState(colorLayer);
+                    before.hueShift = editor.colorDialogOriginalHue;
+                    before.saturationScale = editor.colorDialogOriginalSaturation;
+                    before.lightnessShift = editor.colorDialogOriginalLightness;
+                    colorLayer.hueShift = std::clamp(editor.colorDialogHue, -100.0f, 100.0f);
+                    colorLayer.saturationScale = std::clamp(editor.colorDialogSaturation, 0.0f, 200.0f);
+                    colorLayer.lightnessShift = std::clamp(editor.colorDialogLightness, -100.0f, 100.0f);
+                    UpdateActiveParameterEndpointForLayers(editor, std::vector<int>{editor.colorDialogLayer});
+                    PushLayerOperationWithParameters(
+                        editor,
+                        editor.colorDialogLayer,
+                        before,
+                        CaptureLayerHistoryState(colorLayer),
+                        parametersBefore,
+                        editor.parameters,
+                        "Change layer color"
+                    );
+                    ImGui::CloseCurrentPopup();
+                }
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) {
@@ -841,6 +870,11 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
     std::strncpy(renderOrderBuffer, layer.renderOrderOverride.c_str(), sizeof(renderOrderBuffer) - 1u);
     ImGui::SetNextItemWidth(180.0f);
     if (ImGui::InputText("Render Override", renderOrderBuffer, sizeof(renderOrderBuffer))) {
+        if (snapParameterBeforeLayerEdit()) {
+            ImGui::EndPopup();
+            return;
+        }
+
         const std::vector<DeformParameter> parametersBefore = editor.parameters;
         const LayerHistoryState before = CaptureLayerHistoryState(layer);
         layer.renderOrderOverride = renderOrderBuffer;
@@ -862,6 +896,13 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
             const EditorTexture& texture = editor.document.textures[textureIndex];
             const bool selectedTexture = layer.textureIndex == textureIndex;
             if (ImGui::RadioButton(texture.name.c_str(), selectedTexture)) {
+                if (snapParameterBeforeLayerEdit()) {
+                    ImGui::EndChild();
+                    ImGui::EndMenu();
+                    ImGui::EndPopup();
+                    return;
+                }
+
                 const std::vector<DeformParameter> parametersBefore = editor.parameters;
                 const LayerHistoryState before = CaptureLayerHistoryState(layer);
                 ApplyTextureToLayer(editor.document, layer, textureIndex);
@@ -890,6 +931,13 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
 
             bool masked = ContainsLayerIndex(layer.maskLayerIndices, i);
             if (ImGui::Checkbox(editor.document.layers[i].name.c_str(), &masked)) {
+                if (snapParameterBeforeLayerEdit()) {
+                    ImGui::EndChild();
+                    ImGui::EndMenu();
+                    ImGui::EndPopup();
+                    return;
+                }
+
                 const std::vector<DeformParameter> parametersBefore = editor.parameters;
                 const LayerHistoryState before = CaptureLayerHistoryState(layer);
                 ToggleLayerMask(editor, layerIndex, i);

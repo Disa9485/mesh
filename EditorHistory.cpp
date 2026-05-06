@@ -58,7 +58,8 @@ static bool AreLayerMeshesEqual(const LayerMesh& a, const LayerMesh& b) {
             av.position.x != bv.position.x ||
             av.position.y != bv.position.y ||
             av.uv.x != bv.uv.x ||
-            av.uv.y != bv.uv.y
+            av.uv.y != bv.uv.y ||
+            av.physicsEnabled != bv.physicsEnabled
         ) {
             return false;
         }
