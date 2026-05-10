@@ -76,7 +76,31 @@ static EditorSettingsData LoadSettingsData() {
         } else if (key == "window_maximized") {
             data.window.maximized = ParseBool(value);
             data.window.hasPlacement = true;
+        } else if (key == "window_monitor_name") {
+            data.window.monitorName = value;
+            data.window.hasMonitor = !value.empty() || data.window.hasMonitor;
+        } else if (key == "window_monitor_x") {
+            data.window.monitorX = ParseIntOr(value, data.window.monitorX);
+            data.window.hasMonitor = true;
+        } else if (key == "window_monitor_y") {
+            data.window.monitorY = ParseIntOr(value, data.window.monitorY);
+            data.window.hasMonitor = true;
+        } else if (key == "window_monitor_width") {
+            data.window.monitorWidth = std::max(0, ParseIntOr(value, data.window.monitorWidth));
+            data.window.hasMonitor = true;
+        } else if (key == "window_monitor_height") {
+            data.window.monitorHeight = std::max(0, ParseIntOr(value, data.window.monitorHeight));
+            data.window.hasMonitor = true;
         }
+    }
+
+    if (data.window.x <= -30000 || data.window.y <= -30000) {
+        data.window.x = 80;
+        data.window.y = 80;
+        data.window.width = std::max(1280, data.window.width);
+        data.window.height = std::max(800, data.window.height);
+        data.window.maximized = false;
+        data.window.hasPlacement = true;
     }
 
     return data;
@@ -94,6 +118,11 @@ static void SaveSettingsData(const EditorSettingsData& data) {
     file << "window_width=" << data.window.width << "\n";
     file << "window_height=" << data.window.height << "\n";
     file << "window_maximized=" << (data.window.maximized ? 1 : 0) << "\n";
+    file << "window_monitor_name=" << data.window.monitorName << "\n";
+    file << "window_monitor_x=" << data.window.monitorX << "\n";
+    file << "window_monitor_y=" << data.window.monitorY << "\n";
+    file << "window_monitor_width=" << data.window.monitorWidth << "\n";
+    file << "window_monitor_height=" << data.window.monitorHeight << "\n";
 }
 
 void SaveLastPsdPath(const std::string&) {

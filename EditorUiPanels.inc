@@ -331,6 +331,195 @@ static void DrawMeshGeneratorSettingsPanel(EditorState& editor) {
     ImGui::End();
 }
 
+static float PhysicsStepValue(int stepIndex) {
+    static constexpr float kSteps[] = {0.01f, 0.1f, 1.0f, 10.0f, 100.0f, 1000.0f};
+    constexpr int stepCount = static_cast<int>(sizeof(kSteps) / sizeof(kSteps[0]));
+    const int clamped = std::clamp(stepIndex, 0, stepCount - 1);
+    return kSteps[clamped];
+}
+
+static void DrawStepSizeButton(int& stepIndex) {
+    static constexpr const char* kLabels[] = {"0.01", "0.1", "1", "10", "100", "1000"};
+    constexpr int stepCount = static_cast<int>(sizeof(kLabels) / sizeof(kLabels[0]));
+    stepIndex = std::clamp(stepIndex, 0, stepCount - 1);
+    if (ImGui::Button(kLabels[stepIndex], ImVec2(56.0f, 0.0f))) {
+        stepIndex = (stepIndex + 1) % stepCount;
+    }
+}
+
+static void DrawFloatStepper(
+    const char* label,
+    float& value,
+    int& stepIndex,
+    float minValue,
+    float maxValue,
+    const char* format = "%.3f"
+) {
+    ImGui::PushID(label);
+    const float step = PhysicsStepValue(stepIndex);
+    if (ImGui::Button("-")) {
+        value = std::clamp(value - step, minValue, maxValue);
+    }
+    ImGui::SameLine();
+    ImGui::Text("%s:", label);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(96.0f);
+    ImGui::InputFloat("##value", &value, 0.0f, 0.0f, format);
+    value = std::clamp(value, minValue, maxValue);
+    ImGui::SameLine();
+    if (ImGui::Button("+")) {
+        value = std::clamp(value + step, minValue, maxValue);
+    }
+    ImGui::SameLine();
+    DrawStepSizeButton(stepIndex);
+    ImGui::PopID();
+}
+
+static void DrawIntStepper(
+    const char* label,
+    int& value,
+    int& stepIndex,
+    int minValue,
+    int maxValue
+) {
+    ImGui::PushID(label);
+    const int step = std::max(1, static_cast<int>(std::round(PhysicsStepValue(stepIndex))));
+    if (ImGui::Button("-")) {
+        value = std::clamp(value - step, minValue, maxValue);
+    }
+    ImGui::SameLine();
+    ImGui::Text("%s:", label);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(96.0f);
+    ImGui::InputInt("##value", &value);
+    value = std::clamp(value, minValue, maxValue);
+    ImGui::SameLine();
+    if (ImGui::Button("+")) {
+        value = std::clamp(value + step, minValue, maxValue);
+    }
+    ImGui::SameLine();
+    DrawStepSizeButton(stepIndex);
+    ImGui::PopID();
+}
+
+static void DrawPhysicsSettingsPanels(EditorState& editor) {
+    if (editor.mode != EditorMode::View) {
+        editor.showGlobalPhysicsSettings = false;
+        editor.showLayerPhysicsSettings = false;
+        editor.pendingPhysicsSettingsInitialized = false;
+        editor.pendingLayerPhysicsSettingsInitialized = false;
+        return;
+    }
+
+    if (editor.showGlobalPhysicsSettings) {
+        ImGui::Begin("Global Physics Settings", &editor.showGlobalPhysicsSettings);
+        if (!editor.pendingPhysicsSettingsInitialized) {
+            editor.pendingPhysicsSettings = editor.physicsSettings;
+            editor.pendingPhysicsSettingsInitialized = true;
+        }
+
+        DrawFloatStepper(
+            "Gravity Y",
+            editor.pendingPhysicsSettings.gravityY,
+            editor.physicsGravityStepIndex,
+            -100000.0f,
+            100000.0f,
+            "%.2f"
+        );
+        DrawIntStepper(
+            "Substeps",
+            editor.pendingPhysicsSettings.substeps,
+            editor.physicsSubstepsStepIndex,
+            1,
+            1000
+        );
+        if (ImGui::Button("Apply")) {
+            editor.physicsSettings = editor.pendingPhysicsSettings;
+            ApplyAllDeformParameters(editor);
+            ResetViewPhysics(editor);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            editor.pendingPhysicsSettings = editor.physicsSettings;
+        }
+        ImGui::End();
+    } else {
+        editor.pendingPhysicsSettingsInitialized = false;
+    }
+
+    if (editor.showLayerPhysicsSettings) {
+        ImGui::Begin("Layer Physics Settings", &editor.showLayerPhysicsSettings);
+        if (editor.document.layers.empty()) {
+            ImGui::TextDisabled("No layers.");
+        } else {
+            if (!IsValidLayerIndex(editor, editor.layerPhysicsSettingsLayer)) {
+                editor.layerPhysicsSettingsLayer = 0;
+                editor.pendingLayerPhysicsSettingsInitialized = false;
+            }
+
+            const char* preview = editor.document.layers[editor.layerPhysicsSettingsLayer].name.c_str();
+            if (ImGui::BeginCombo("Layer", preview)) {
+                for (int layerIndex = 0; layerIndex < static_cast<int>(editor.document.layers.size()); ++layerIndex) {
+                    const bool selected = layerIndex == editor.layerPhysicsSettingsLayer;
+                    if (ImGui::Selectable(editor.document.layers[layerIndex].name.c_str(), selected)) {
+                        editor.layerPhysicsSettingsLayer = layerIndex;
+                        editor.pendingLayerPhysicsSettingsInitialized = false;
+                    }
+                    if (selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            EditorLayer& layer = editor.document.layers[editor.layerPhysicsSettingsLayer];
+            if (!editor.pendingLayerPhysicsSettingsInitialized) {
+                editor.pendingLayerPhysicsSettings = layer.physicsSettings;
+                editor.pendingLayerPhysicsSettingsInitialized = true;
+            }
+
+            DrawFloatStepper("Spring K", editor.pendingLayerPhysicsSettings.springK, editor.layerPhysicsSpringStepIndex, 0.0f, 100000.0f, "%.2f");
+            DrawFloatStepper("Damping", editor.pendingLayerPhysicsSettings.damping, editor.layerPhysicsDampingStepIndex, 0.0f, 100000.0f, "%.2f");
+            DrawFloatStepper("Vertex Mass", editor.pendingLayerPhysicsSettings.vertexMass, editor.layerPhysicsMassStepIndex, 0.001f, 100000.0f, "%.3f");
+            DrawFloatStepper("Gravity Scale", editor.pendingLayerPhysicsSettings.gravityScale, editor.layerPhysicsGravityScaleStepIndex, -1000.0f, 1000.0f, "%.3f");
+            DrawFloatStepper("Stretch Limit", editor.pendingLayerPhysicsSettings.stretchLimit, editor.layerPhysicsStretchLimitStepIndex, 1.0f, 10000.0f, "%.3f");
+
+            if (ImGui::Button("Copy")) {
+                editor.layerPhysicsClipboard = editor.pendingLayerPhysicsSettings;
+                editor.hasLayerPhysicsClipboard = true;
+            }
+            ImGui::SameLine();
+            if (!editor.hasLayerPhysicsClipboard) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Paste")) {
+                editor.pendingLayerPhysicsSettings = editor.layerPhysicsClipboard;
+            }
+            if (!editor.hasLayerPhysicsClipboard) {
+                ImGui::EndDisabled();
+            }
+
+            if (ImGui::Button("Apply")) {
+                layer.physicsSettings = editor.pendingLayerPhysicsSettings;
+                ApplyAllDeformParameters(editor);
+                RebuildPhysicsLayer(editor, editor.layerPhysicsSettingsLayer);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset")) {
+                editor.pendingLayerPhysicsSettings = layer.physicsSettings;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Rebuild Layer")) {
+                ApplyAllDeformParameters(editor);
+                RebuildPhysicsLayer(editor, editor.layerPhysicsSettingsLayer);
+            }
+        }
+        ImGui::End();
+    } else {
+        editor.pendingLayerPhysicsSettingsInitialized = false;
+    }
+}
+
 static void DrawViewportControlPanel(EditorState& editor) {
     ImGui::TextUnformatted("Edit Mode");
     ImGui::SameLine();
@@ -350,10 +539,12 @@ static void DrawViewportControlPanel(EditorState& editor) {
         editor.selectedLayer = -1;
         ClearAllVertexSelection(editor);
         ClearParameterSetpointSelection(editor);
+        ResetViewPhysics(editor);
         ApplyAllDeformParameters(editor);
     }
     ImGui::SameLine();
     if (ImGui::RadioButton("Deform", editor.mode == EditorMode::Layer)) {
+        ResetViewPhysics(editor);
         editor.mode = EditorMode::Layer;
         ClearMeshSelection(editor);
         editor.meshModeGuideMeshes.clear();
@@ -363,6 +554,7 @@ static void DrawViewportControlPanel(EditorState& editor) {
     }
     ImGui::SameLine();
     if (ImGui::RadioButton("Mesh", editor.mode == EditorMode::Mesh)) {
+        ResetViewPhysics(editor);
         editor.mode = EditorMode::Mesh;
         editor.draggingLayer = false;
         editor.draggedLayer = -1;
@@ -433,6 +625,58 @@ static void DrawViewportControlPanel(EditorState& editor) {
 
     if (!IsValidLayerIndex(editor, editor.selectedLayer) || editControlsLocked) {
         ImGui::EndDisabled();
+    }
+
+    if (editor.mode == EditorMode::View) {
+        ImGui::SameLine();
+        const bool hasPhysicsVertices = std::any_of(
+            editor.document.layers.begin(),
+            editor.document.layers.end(),
+            [](const EditorLayer& layer) {
+                return LayerHasPhysicsVertices(layer);
+            }
+        );
+        if (!hasPhysicsVertices) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button(editor.physicsEnabled ? "Physics: On" : "Physics: Off")) {
+            editor.physicsEnabled = !editor.physicsEnabled;
+            ResetViewPhysics(editor);
+            if (!editor.physicsEnabled) {
+                ApplyAllDeformParameters(editor);
+            }
+        }
+        if (!hasPhysicsVertices) {
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
+        if (!hasPhysicsVertices || !editor.physicsEnabled) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Rebuild Soft Bodies")) {
+            ApplyAllDeformParameters(editor);
+            ResetViewPhysics(editor);
+        }
+        if (!hasPhysicsVertices || !editor.physicsEnabled) {
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Global Physics Settings")) {
+            editor.showGlobalPhysicsSettings = true;
+        }
+        ImGui::SameLine();
+        if (editor.document.layers.empty()) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Layer Physics Settings")) {
+            if (!IsValidLayerIndex(editor, editor.layerPhysicsSettingsLayer)) {
+                editor.layerPhysicsSettingsLayer = 0;
+            }
+            editor.showLayerPhysicsSettings = true;
+        }
+        if (editor.document.layers.empty()) {
+            ImGui::EndDisabled();
+        }
     }
 
     ImGui::SameLine();

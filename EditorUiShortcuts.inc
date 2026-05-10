@@ -210,6 +210,11 @@ static void HandleEditorShortcuts(EditorState& editor) {
 }
 
 void DrawEditor(EditorState& editor, GLFWwindow* window) {
+    if (editor.loadingScreenActive) {
+        DrawLoadingScreen(editor, window);
+        return;
+    }
+
     HandleEditorShortcuts(editor);
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -235,7 +240,45 @@ void DrawEditor(EditorState& editor, GLFWwindow* window) {
     DrawDeformParametersPanel(editor);
 
     DrawMeshGeneratorSettingsPanel(editor);
+    DrawPhysicsSettingsPanels(editor);
     DrawHistoryPanel(editor);
+
+    int physicsWindowWidth = 0;
+    int physicsWindowHeight = 0;
+    glfwGetWindowSize(window, &physicsWindowWidth, &physicsWindowHeight);
+    const bool windowSizeChanged =
+        physicsWindowWidth != editor.physicsWindowWidth ||
+        physicsWindowHeight != editor.physicsWindowHeight;
+    if (windowSizeChanged) {
+        editor.physicsWindowWidth = physicsWindowWidth;
+        editor.physicsWindowHeight = physicsWindowHeight;
+        editor.physicsResizeStableFrames = 0;
+        editor.physicsPausedByResize = true;
+    } else if (editor.physicsPausedByResize) {
+        ++editor.physicsResizeStableFrames;
+    }
+
+    const bool windowMinimized =
+        glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE ||
+        physicsWindowWidth <= 0 ||
+        physicsWindowHeight <= 0;
+    if (windowMinimized) {
+        editor.physicsPausedByMinimize = true;
+    } else {
+        const bool resizeSettled =
+            !editor.physicsPausedByResize ||
+            editor.physicsResizeStableFrames >= 2;
+        if (editor.physicsPausedByMinimize || (editor.physicsPausedByResize && resizeSettled)) {
+            ApplyAllDeformParameters(editor);
+            ResetViewPhysics(editor);
+            editor.physicsPausedByMinimize = false;
+            editor.physicsPausedByResize = false;
+            editor.physicsResizeStableFrames = 0;
+        }
+        if (resizeSettled) {
+            StepViewPhysics(editor, ImGui::GetIO().DeltaTime);
+        }
+    }
 
     ImGui::SetNextWindowPos(ImVec2(workPos.x + sideWidth, sideTop), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(workSize.x - sideWidth, sideHeight), ImGuiCond_Always);

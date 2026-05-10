@@ -1932,6 +1932,252 @@ static void CaptureMeshModeGuideMeshes(EditorState& editor) {
     }
 }
 
+static bool LayerHasPhysicsVertices(const EditorLayer& layer) {
+    return std::any_of(
+        layer.mesh.vertices.begin(),
+        layer.mesh.vertices.end(),
+        [](const MeshVertex& vertex) {
+            return vertex.physicsEnabled;
+        }
+    );
+}
+
+static EditorLayerPhysicsState* FindLayerPhysicsState(EditorState& editor, int layerIndex) {
+    for (EditorLayerPhysicsState& state : editor.physicsLayers) {
+        if (state.layerIndex == layerIndex) {
+            return &state;
+        }
+    }
+
+    return nullptr;
+}
+
+static void RebuildPhysicsLayer(EditorState& editor, int layerIndex) {
+    if (!IsValidLayerIndex(editor, layerIndex)) {
+        return;
+    }
+
+    const EditorLayer& layer = editor.document.layers[layerIndex];
+    EditorLayerPhysicsState* state = FindLayerPhysicsState(editor, layerIndex);
+    if (!state) {
+        editor.physicsLayers.push_back(EditorLayerPhysicsState{});
+        state = &editor.physicsLayers.back();
+    }
+
+    state->layerIndex = layerIndex;
+    state->valid = true;
+    state->vertices.clear();
+    state->springs.clear();
+    state->vertices.resize(layer.mesh.vertices.size());
+
+    for (std::size_t i = 0; i < layer.mesh.vertices.size(); ++i) {
+        state->vertices[i].active = layer.mesh.vertices[i].physicsEnabled;
+        state->vertices[i].position = layer.mesh.vertices[i].position;
+        state->vertices[i].velocity = Vec2{};
+    }
+
+    for (const MeshEdge& edge : layer.mesh.edges) {
+        if (
+            edge.a >= layer.mesh.vertices.size() ||
+            edge.b >= layer.mesh.vertices.size() ||
+            (!layer.mesh.vertices[edge.a].physicsEnabled &&
+             !layer.mesh.vertices[edge.b].physicsEnabled)
+        ) {
+            continue;
+        }
+
+        const Vec2 delta =
+            layer.mesh.vertices[edge.b].position -
+            layer.mesh.vertices[edge.a].position;
+        state->springs.push_back(EditorPhysicsSpring{
+            edge.a,
+            edge.b,
+            std::max(0.001f, Len(delta))
+        });
+    }
+}
+
+static void ResetViewPhysics(EditorState& editor) {
+    editor.physicsLayers.clear();
+}
+
+static void EnsureViewPhysicsState(EditorState& editor) {
+    editor.physicsLayers.erase(
+        std::remove_if(
+            editor.physicsLayers.begin(),
+            editor.physicsLayers.end(),
+            [&](const EditorLayerPhysicsState& state) {
+                return
+                    !IsValidLayerIndex(editor, state.layerIndex) ||
+                    !LayerHasPhysicsVertices(editor.document.layers[state.layerIndex]);
+            }
+        ),
+        editor.physicsLayers.end()
+    );
+
+    for (int layerIndex = 0; layerIndex < static_cast<int>(editor.document.layers.size()); ++layerIndex) {
+        const EditorLayer& layer = editor.document.layers[layerIndex];
+        if (!LayerHasPhysicsVertices(layer)) {
+            continue;
+        }
+
+        EditorLayerPhysicsState* state = FindLayerPhysicsState(editor, layerIndex);
+        if (
+            !state ||
+            !state->valid ||
+            state->vertices.size() != layer.mesh.vertices.size()
+        ) {
+            RebuildPhysicsLayer(editor, layerIndex);
+        }
+    }
+
+}
+
+static void StepPhysicsLayer(
+    EditorState& editor,
+    EditorLayerPhysicsState& state,
+    float dt
+) {
+    if (!IsValidLayerIndex(editor, state.layerIndex)) {
+        state.valid = false;
+        return;
+    }
+
+    EditorLayer& layer = editor.document.layers[state.layerIndex];
+    if (state.vertices.size() != layer.mesh.vertices.size()) {
+        RebuildPhysicsLayer(editor, state.layerIndex);
+        return;
+    }
+
+    const EditorLayerPhysicsSettings& layerPhysics = layer.physicsSettings;
+    const int substeps = std::max(1, editor.physicsSettings.substeps);
+    const float stepDt = dt / static_cast<float>(substeps);
+    const float vertexMass = std::max(0.001f, layerPhysics.vertexMass);
+    const float invMass = 1.0f / vertexMass;
+    constexpr float kMaxPhysicsForce = 250000.0f;
+    constexpr float kMaxPhysicsVelocity = 8000.0f;
+    constexpr float kSleepSpeed = 0.025f;
+    constexpr float kSleepForce = 0.25f;
+
+    auto isFiniteVec = [](const Vec2& v) {
+        return std::isfinite(v.x) && std::isfinite(v.y);
+    };
+
+    auto clampLength = [](Vec2 v, float maxLength) {
+        const float length = Len(v);
+        if (length <= maxLength || length <= 0.0001f) {
+            return v;
+        }
+        const float scale = maxLength / length;
+        v.x *= scale;
+        v.y *= scale;
+        return v;
+    };
+
+    for (int step = 0; step < substeps; ++step) {
+        std::vector<Vec2> forces(state.vertices.size(), Vec2{});
+
+        for (std::size_t i = 0; i < state.vertices.size(); ++i) {
+            if (state.vertices[i].active) {
+                forces[i].y += editor.physicsSettings.gravityY * layerPhysics.gravityScale * vertexMass;
+            } else if (i < layer.mesh.vertices.size()) {
+                state.vertices[i].position = layer.mesh.vertices[i].position;
+                state.vertices[i].velocity = Vec2{};
+            }
+        }
+
+        for (const EditorPhysicsSpring& spring : state.springs) {
+            if (
+                spring.a >= state.vertices.size() ||
+                spring.b >= state.vertices.size()
+            ) {
+                continue;
+            }
+
+            const Vec2 pa = state.vertices[spring.a].active
+                ? state.vertices[spring.a].position
+                : layer.mesh.vertices[spring.a].position;
+            const Vec2 pb = state.vertices[spring.b].active
+                ? state.vertices[spring.b].position
+                : layer.mesh.vertices[spring.b].position;
+            const Vec2 delta = pb - pa;
+            const float length = std::max(0.001f, Len(delta));
+            const Vec2 dir{delta.x / length, delta.y / length};
+            const float maxExtension = spring.restLength * (std::max(1.0f, layerPhysics.stretchLimit) - 1.0f);
+            const float extension = std::clamp(length - spring.restLength, -maxExtension, maxExtension);
+            const float forceMagnitude = layerPhysics.springK * extension;
+            const Vec2 force{dir.x * forceMagnitude, dir.y * forceMagnitude};
+
+            if (state.vertices[spring.a].active) {
+                forces[spring.a].x += force.x;
+                forces[spring.a].y += force.y;
+            }
+            if (state.vertices[spring.b].active) {
+                forces[spring.b].x -= force.x;
+                forces[spring.b].y -= force.y;
+            }
+        }
+
+        for (std::size_t i = 0; i < state.vertices.size(); ++i) {
+            EditorPhysicsVertexState& vertex = state.vertices[i];
+            if (!vertex.active) {
+                continue;
+            }
+
+            forces[i].x -= vertex.velocity.x * layerPhysics.damping;
+            forces[i].y -= vertex.velocity.y * layerPhysics.damping;
+            if (!isFiniteVec(forces[i]) || !isFiniteVec(vertex.position) || !isFiniteVec(vertex.velocity)) {
+                vertex.position = i < layer.mesh.vertices.size()
+                    ? layer.mesh.vertices[i].position
+                    : Vec2{};
+                vertex.velocity = Vec2{};
+                continue;
+            }
+
+            forces[i] = clampLength(forces[i], kMaxPhysicsForce);
+            if (Len(vertex.velocity) < kSleepSpeed && Len(forces[i]) < kSleepForce) {
+                vertex.velocity = Vec2{};
+                continue;
+            }
+
+            vertex.velocity.x += forces[i].x * invMass * stepDt;
+            vertex.velocity.y += forces[i].y * invMass * stepDt;
+            vertex.velocity = clampLength(vertex.velocity, kMaxPhysicsVelocity);
+            vertex.position.x += vertex.velocity.x * stepDt;
+            vertex.position.y += vertex.velocity.y * stepDt;
+            if (!isFiniteVec(vertex.position) || !isFiniteVec(vertex.velocity)) {
+                vertex.position = i < layer.mesh.vertices.size()
+                    ? layer.mesh.vertices[i].position
+                    : Vec2{};
+                vertex.velocity = Vec2{};
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < state.vertices.size(); ++i) {
+        if (state.vertices[i].active && i < layer.mesh.vertices.size()) {
+            layer.mesh.vertices[i].position = state.vertices[i].position;
+        }
+    }
+
+    UpdateLayerBoundsFromMesh(layer);
+}
+
+static void StepViewPhysics(EditorState& editor, float dt) {
+    if (!editor.physicsEnabled || editor.mode != EditorMode::View) {
+        return;
+    }
+
+    EnsureViewPhysicsState(editor);
+
+    const float clampedDt = std::clamp(dt, 0.0f, 1.0f / 20.0f);
+    for (EditorLayerPhysicsState& state : editor.physicsLayers) {
+        if (state.valid) {
+            StepPhysicsLayer(editor, state, clampedDt);
+        }
+    }
+}
+
 static LayerMesh MeshWithoutOtherParameterDeltas(
     const EditorState& editor,
     int selectedParameterIndex,
@@ -2635,8 +2881,12 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
 ) {
     const ImVec2 sliderMin = ImGui::GetItemRectMin();
     const ImVec2 sliderMax = ImGui::GetItemRectMax();
-    const float sliderWidth = sliderMax.x - sliderMin.x;
-    if (sliderWidth <= 0.0f) {
+    const float sliderFrameWidth = sliderMax.x - sliderMin.x;
+    const float grabTravelInset = std::min(sliderFrameWidth * 0.5f, ImGui::GetStyle().GrabMinSize * 0.5f);
+    const float sliderValueMinX = sliderMin.x + grabTravelInset;
+    const float sliderValueMaxX = sliderMax.x - grabTravelInset;
+    const float sliderValueWidth = sliderValueMaxX - sliderValueMinX;
+    if (sliderValueWidth <= 0.0f) {
         return false;
     }
 
@@ -2648,7 +2898,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
         const bool selected =
             editor.selectedParameterSetpointParameter == parameterIndex &&
             NearlyEqualSetpointValue(editor.selectedParameterSetpointValue, setpoint);
-        const float x = sliderMin.x + sliderWidth * setpoint;
+        const float x = sliderValueMinX + sliderValueWidth * setpoint;
         drawList->AddLine(
             ImVec2(x, sliderMin.y + 2.0f),
             ImVec2(x, sliderMax.y - 2.0f),
@@ -2699,7 +2949,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
         if (!IsEndpointSetpointValue(oldValue)) {
             const float requested = std::clamp(
                 editor.parameterSetpointDragStartValue +
-                    (io.MousePos.x - editor.parameterSetpointDragStartMouseX) / sliderWidth,
+                    (io.MousePos.x - editor.parameterSetpointDragStartMouseX) / sliderValueWidth,
                 0.0f,
                 1.0f
             );
@@ -2745,7 +2995,7 @@ static bool DrawParameterSetpointMarkersAndHandleSnap(
         float nearestSetpoint = 0.0f;
         float nearestDistance = snapRadius;
         for (const float setpoint : setpoints) {
-            const float x = sliderMin.x + sliderWidth * setpoint;
+            const float x = sliderValueMinX + sliderValueWidth * setpoint;
             const float distance = std::abs(io.MousePos.x - x);
             if (distance <= nearestDistance) {
                 nearestDistance = distance;

@@ -734,6 +734,61 @@ static bool ReadBinaryString(std::istream& in, std::string& value) {
     return static_cast<bool>(in);
 }
 
+static bool WriteBinaryPhysicsSettings(std::ostream& out, const EditorPhysicsSettings& settings) {
+    return
+        WriteBinaryValue(out, settings.gravityY) &&
+        WriteBinaryValue(out, settings.springK) &&
+        WriteBinaryValue(out, settings.damping) &&
+        WriteBinaryValue(out, settings.vertexMass) &&
+        WriteBinaryValue(out, settings.substeps);
+}
+
+static bool ReadBinaryPhysicsSettings(
+    std::istream& in,
+    EditorPhysicsSettings& settings,
+    bool hasRebuildThresholds
+) {
+    float legacyRebuildJumpThreshold = 0.0f;
+    float legacyRebuildSpeedThreshold = 0.0f;
+    if (!(
+        ReadBinaryValue(in, settings.gravityY) &&
+        ReadBinaryValue(in, settings.springK) &&
+        ReadBinaryValue(in, settings.damping) &&
+        ReadBinaryValue(in, settings.vertexMass)
+    )) {
+        return false;
+    }
+
+    if (hasRebuildThresholds) {
+        if (
+            !ReadBinaryValue(in, legacyRebuildJumpThreshold) ||
+            !ReadBinaryValue(in, legacyRebuildSpeedThreshold)
+        ) {
+            return false;
+        }
+    }
+
+    return ReadBinaryValue(in, settings.substeps);
+}
+
+static bool WriteBinaryLayerPhysicsSettings(std::ostream& out, const EditorLayerPhysicsSettings& settings) {
+    return
+        WriteBinaryValue(out, settings.springK) &&
+        WriteBinaryValue(out, settings.damping) &&
+        WriteBinaryValue(out, settings.vertexMass) &&
+        WriteBinaryValue(out, settings.gravityScale) &&
+        WriteBinaryValue(out, settings.stretchLimit);
+}
+
+static bool ReadBinaryLayerPhysicsSettings(std::istream& in, EditorLayerPhysicsSettings& settings) {
+    return
+        ReadBinaryValue(in, settings.springK) &&
+        ReadBinaryValue(in, settings.damping) &&
+        ReadBinaryValue(in, settings.vertexMass) &&
+        ReadBinaryValue(in, settings.gravityScale) &&
+        ReadBinaryValue(in, settings.stretchLimit);
+}
+
 static bool gReadBinaryMeshHasPhysics = false;
 
 static bool WriteBinaryMesh(std::ostream& out, LayerMesh mesh) {
@@ -2652,12 +2707,16 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
     const bool isVersion13 = magicString == std::string("MESHEDBD", 8);
     const bool isVersion14 = magicString == std::string("MESHEDBE", 8);
     const bool isVersion15 = magicString == std::string("MESHEDBF", 8);
-    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9 && !isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isVersion15)) {
+    const bool isVersion16 = magicString == std::string("MESHEDBG", 8);
+    const bool isVersion17 = magicString == std::string("MESHEDBH", 8);
+    const bool isVersion18 = magicString == std::string("MESHEDBI", 8);
+    const bool isCurrentProjectVersion = isVersion15 || isVersion16 || isVersion17 || isVersion18;
+    if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9 && !isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isCurrentProjectVersion)) {
         error = "Binary mesh file has an invalid header.";
         return false;
     }
 
-    gReadBinaryMeshHasPhysics = isVersion15;
+    gReadBinaryMeshHasPhysics = isCurrentProjectVersion;
 
     std::uint32_t canvasWidth = 0;
     std::uint32_t canvasHeight = 0;
@@ -2672,8 +2731,13 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         return false;
     }
 
-    if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) && !ReadBinaryString(file, editor.document.psdPath)) {
+    if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) && !ReadBinaryString(file, editor.document.psdPath)) {
         error = "Project file has an invalid PSD path.";
+        return false;
+    }
+
+    if ((isVersion16 || isVersion17 || isVersion18) && !ReadBinaryPhysicsSettings(file, editor.physicsSettings, isVersion17)) {
+        error = "Project file has invalid global physics settings.";
         return false;
     }
 
@@ -2701,6 +2765,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         std::vector<int> masks;
         int textureIndex = -1;
         std::string textureName;
+        EditorLayerPhysicsSettings physicsSettings;
     };
 
     std::vector<LoadedLayerRecord> loadedRecords;
@@ -2727,12 +2792,12 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         float saturationScale = 100.0f;
         float lightnessShift = 0.0f;
         std::vector<int> masks;
-        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) {
+        if (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) {
             if (!ReadBinaryValue(file, opacity)) {
                 error = "Binary mesh file has invalid layer opacity.";
                 return false;
             }
-            if (isVersion14 || isVersion15) {
+            if (isVersion14 || isCurrentProjectVersion) {
                 if (
                     !ReadBinaryValue(file, hueShift) ||
                     !ReadBinaryValue(file, saturationScale) ||
@@ -2758,12 +2823,12 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         }
 
         std::string renderOrderOverride;
-        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) && !ReadBinaryString(file, renderOrderOverride)) {
+        if ((isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) && !ReadBinaryString(file, renderOrderOverride)) {
             error = "Binary mesh file has invalid layer render order override.";
             return false;
         }
 
-        if (isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) {
+        if (isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) {
             std::uint8_t savedVisible = 1u;
             if (!ReadBinaryValue(file, savedVisible)) {
                 error = "Binary mesh file has invalid layer visibility.";
@@ -2773,23 +2838,29 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         }
 
         int textureIndex = savedIndex;
-        if ((isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) && !ReadBinaryValue(file, textureIndex)) {
+        if ((isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) && !ReadBinaryValue(file, textureIndex)) {
             error = "Binary mesh file has invalid layer texture index.";
             return false;
         }
         std::string textureName;
-        if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) && !ReadBinaryString(file, textureName)) {
+        if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) && !ReadBinaryString(file, textureName)) {
             error = "Project file has invalid layer texture name.";
             return false;
         }
-        if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) && !textureName.empty()) {
+        if ((isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) && !textureName.empty()) {
             const int namedTextureIndex = FindTextureIndexByName(editor.document, textureName);
             if (namedTextureIndex >= 0) {
                 textureIndex = namedTextureIndex;
             }
         }
 
-        if (!isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isVersion15 && targetIndex < 0) {
+        EditorLayerPhysicsSettings physicsSettings;
+        if ((isVersion16 || isVersion17 || isVersion18) && !ReadBinaryLayerPhysicsSettings(file, physicsSettings)) {
+            error = "Project file has invalid layer physics settings.";
+            return false;
+        }
+
+        if (!isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isCurrentProjectVersion && targetIndex < 0) {
             continue;
         }
 
@@ -2806,10 +2877,11 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         record.masks = std::move(masks);
         record.textureIndex = textureIndex;
         record.textureName = std::move(textureName);
+        record.physicsSettings = physicsSettings;
         loadedRecords.push_back(std::move(record));
     }
 
-    if (isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) {
+    if (isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) {
         editor.document.layers.clear();
         editor.document.layers.reserve(loadedRecords.size());
         for (const LoadedLayerRecord& record : loadedRecords) {
@@ -2844,7 +2916,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
 
     int loadedCount = 0;
     for (std::size_t i = 0; i < loadedRecords.size(); ++i) {
-        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15)
+        const int applyIndex = (isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion)
             ? static_cast<int>(i)
             : loadedRecords[i].targetIndex;
         if (!(
@@ -2863,7 +2935,8 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         layer.lightnessShift = std::clamp(loadedRecords[i].lightnessShift, -100.0f, 100.0f);
         layer.renderOrderOverride = std::move(loadedRecords[i].renderOrderOverride);
         layer.maskLayerIndices = std::move(loadedRecords[i].masks);
-        if (isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15) {
+        layer.physicsSettings = loadedRecords[i].physicsSettings;
+        if (isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) {
             ApplyTextureToLayer(editor.document, layer, loadedRecords[i].textureIndex);
         }
         UpdateLayerBoundsFromCurrentMesh(layer);
@@ -2873,19 +2946,19 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
     if (!ReadBinaryHistory(
         file,
         editor,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion13 || isVersion14 || isVersion15,
-        isVersion14 || isVersion15,
-        isVersion14 || isVersion15
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion2 || isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion14 || isCurrentProjectVersion,
+        isVersion14 || isCurrentProjectVersion
     )) {
         error = "Binary mesh file has invalid history data.";
         return false;
@@ -2894,14 +2967,14 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
     if (!ReadBinaryParameters(
         file,
         editor,
-        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion12 || isVersion13 || isVersion14 || isVersion15,
-        isVersion13 || isVersion14 || isVersion15,
-        isVersion14 || isVersion15
+        isVersion3 || isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion4 || isVersion5 || isVersion6 || isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion7 || isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion8 || isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion13 || isVersion14 || isCurrentProjectVersion,
+        isVersion14 || isCurrentProjectVersion
     )) {
         error = "Binary mesh file has invalid parameter data.";
         return false;
@@ -3153,7 +3226,10 @@ bool LoadProjectForEditor(
         std::string(magic, sizeof(magic)) == std::string("MESHEDBC", 8) ||
         std::string(magic, sizeof(magic)) == std::string("MESHEDBD", 8) ||
         std::string(magic, sizeof(magic)) == std::string("MESHEDBE", 8) ||
-        std::string(magic, sizeof(magic)) == std::string("MESHEDBF", 8);
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBF", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBG", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBH", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBI", 8);
     std::string projectPsdPath;
     if (hasProjectPsdField) {
         std::uint32_t canvasWidth = 0;
@@ -3221,7 +3297,7 @@ bool SaveProjectForEditor(const EditorState& editor, const std::string& path, st
         return false;
     }
 
-    file.write("MESHEDBF", 8);
+    file.write("MESHEDBI", 8);
 
     const std::uint32_t canvasWidth = static_cast<std::uint32_t>(std::max(0, editor.document.canvasWidth));
     const std::uint32_t canvasHeight = static_cast<std::uint32_t>(std::max(0, editor.document.canvasHeight));
@@ -3231,7 +3307,8 @@ bool SaveProjectForEditor(const EditorState& editor, const std::string& path, st
         !WriteBinaryValue(file, canvasWidth) ||
         !WriteBinaryValue(file, canvasHeight) ||
         !WriteBinaryString(file, psdName) ||
-        !WriteBinaryString(file, editor.document.psdPath)
+        !WriteBinaryString(file, editor.document.psdPath) ||
+        !WriteBinaryPhysicsSettings(file, editor.physicsSettings)
     ) {
         error = "Could not write binary mesh header.";
         return false;
@@ -3305,6 +3382,11 @@ bool SaveProjectForEditor(const EditorState& editor, const std::string& path, st
                 : std::string{};
         if (!WriteBinaryString(file, textureName)) {
             error = "Could not write layer texture name.";
+            return false;
+        }
+
+        if (!WriteBinaryLayerPhysicsSettings(file, layer.physicsSettings)) {
+            error = "Could not write layer physics settings.";
             return false;
         }
     }

@@ -59,6 +59,41 @@ struct LayerMesh {
     std::vector<MeshEdge> edges;
 };
 
+struct EditorPhysicsSettings {
+    float gravityY = 900.0f;
+    float springK = 90.0f;
+    float damping = 10.0f;
+    float vertexMass = 1.0f;
+    int substeps = 4;
+};
+
+struct EditorLayerPhysicsSettings {
+    float springK = 90.0f;
+    float damping = 10.0f;
+    float vertexMass = 1.0f;
+    float gravityScale = 1.0f;
+    float stretchLimit = 3.0f;
+};
+
+struct EditorPhysicsVertexState {
+    bool active = false;
+    Vec2 position;
+    Vec2 velocity;
+};
+
+struct EditorPhysicsSpring {
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    float restLength = 0.0f;
+};
+
+struct EditorLayerPhysicsState {
+    int layerIndex = -1;
+    std::vector<EditorPhysicsVertexState> vertices;
+    std::vector<EditorPhysicsSpring> springs;
+    bool valid = false;
+};
+
 struct DeformParameterMeshCorner {
     std::vector<int> parameterIndices;
     std::vector<float> parameterValues;
@@ -189,6 +224,13 @@ enum class SelectionDragShape {
     Circle
 };
 
+enum class EditorLoadingOperation {
+    None,
+    LoadPath,
+    NewProject,
+    AttachPsd
+};
+
 struct EditorLayer {
     std::string name;
     int textureIndex = -1;
@@ -219,6 +261,7 @@ struct EditorLayer {
     std::vector<std::uint8_t> renderedRgba;
 
     LayerMesh mesh;
+    EditorLayerPhysicsSettings physicsSettings;
 };
 
 struct EditorTexture {
@@ -334,11 +377,42 @@ struct EditorState {
 
     EditHistory history;
     MeshGeneratorSettings meshSettings;
+    EditorPhysicsSettings physicsSettings;
+    EditorPhysicsSettings pendingPhysicsSettings;
+    EditorLayerPhysicsSettings pendingLayerPhysicsSettings;
+    EditorLayerPhysicsSettings layerPhysicsClipboard;
+    bool hasLayerPhysicsClipboard = false;
+    bool physicsEnabled = true;
+    bool physicsPausedByMinimize = false;
+    bool physicsPausedByResize = false;
+    int physicsWindowWidth = 0;
+    int physicsWindowHeight = 0;
+    int physicsResizeStableFrames = 0;
+    std::vector<EditorLayerPhysicsState> physicsLayers;
     bool showMeshGeneratorSettings = false;
+    bool showGlobalPhysicsSettings = false;
+    bool showLayerPhysicsSettings = false;
+    bool pendingPhysicsSettingsInitialized = false;
+    bool pendingLayerPhysicsSettingsInitialized = false;
+    int layerPhysicsSettingsLayer = -1;
+    int physicsGravityStepIndex = 3;
+    int physicsSubstepsStepIndex = 2;
+    int layerPhysicsSpringStepIndex = 3;
+    int layerPhysicsDampingStepIndex = 2;
+    int layerPhysicsMassStepIndex = 2;
+    int layerPhysicsGravityScaleStepIndex = 1;
+    int layerPhysicsStretchLimitStepIndex = 1;
     bool showHistoryPanel = false;
+    bool loadingScreenActive = false;
+    int loadingFramesBeforeExecute = 0;
+    EditorLoadingOperation loadingOperation = EditorLoadingOperation::None;
+    std::string loadingPath;
+    std::string loadingDisplayName;
+    bool showNewProjectDialog = false;
     bool showLoadProjectDialog = false;
     bool showSaveProjectAsDialog = false;
     bool showAttachPsdDialog = false;
+    char newProjectName[128] = {};
     bool duplicateLayerCopyParameters = false;
     bool showAlignMeshesPopup = false;
     int alignMeshesTargetLayer = -1;

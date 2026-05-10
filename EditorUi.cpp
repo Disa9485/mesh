@@ -11,6 +11,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -36,6 +37,7 @@ static void ReconcileParameterMeshesAfterMeshVertexMove(
 static void RebuildLayersAffectedByLayerGeometry(EditorState& editor, int changedLayerIndex);
 static bool ActiveParameterNeedsSetpointSnapBeforeEdit(EditorState& editor);
 static bool ContinueParameterEditSetpointSnap(EditorState& editor);
+static void StepViewPhysics(EditorState& editor, float dt);
 
 #include "EditorUiProject.inc"
 #include "EditorUiSelection.inc"
