@@ -110,6 +110,7 @@ struct DeformParameterLayerSetpoint {
     float lightnessShift = 0.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
+    bool physicsEnabled = true;
 };
 
 struct DeformParameterLayerState {
@@ -132,6 +133,8 @@ struct DeformParameterLayerState {
     std::string renderOrderOverrideAt1;
     std::vector<int> maskLayerIndicesAt0;
     std::vector<int> maskLayerIndicesAt1;
+    bool physicsEnabledAt0 = true;
+    bool physicsEnabledAt1 = true;
 };
 
 enum class DeformParameterType {
@@ -151,6 +154,7 @@ struct DeformParameter {
     bool affectsOpacity = true;
     bool affectsTexture = false;
     bool affectsColor = false;
+    bool affectsPhysics = false;
     std::vector<DeformParameterLayerState> layers;
 };
 
@@ -178,6 +182,7 @@ struct LayerHistoryState {
     float lightnessShift = 0.0f;
     std::string renderOrderOverride;
     std::vector<int> maskLayerIndices;
+    bool physicsEnabled = true;
     LayerMesh mesh;
 };
 
@@ -261,6 +266,7 @@ struct EditorLayer {
     std::vector<std::uint8_t> renderedRgba;
 
     LayerMesh mesh;
+    bool physicsEnabled = true;
     EditorLayerPhysicsSettings physicsSettings;
 };
 

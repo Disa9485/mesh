@@ -21,6 +21,7 @@ LayerHistoryState CaptureLayerHistoryState(const EditorLayer& layer) {
     state.lightnessShift = layer.lightnessShift;
     state.renderOrderOverride = layer.renderOrderOverride;
     state.maskLayerIndices = layer.maskLayerIndices;
+    state.physicsEnabled = layer.physicsEnabled;
     state.mesh = layer.mesh;
     return state;
 }
@@ -38,6 +39,7 @@ void ApplyLayerHistoryState(EditorLayer& layer, const LayerHistoryState& state) 
     layer.lightnessShift = state.lightnessShift;
     layer.renderOrderOverride = state.renderOrderOverride;
     layer.maskLayerIndices = state.maskLayerIndices;
+    layer.physicsEnabled = state.physicsEnabled;
     layer.mesh = state.mesh;
 }
 
@@ -107,7 +109,8 @@ static bool AreParameterLayerSetpointsEqual(
             a[i].saturationScale != b[i].saturationScale ||
             a[i].lightnessShift != b[i].lightnessShift ||
             a[i].renderOrderOverride != b[i].renderOrderOverride ||
-            a[i].maskLayerIndices != b[i].maskLayerIndices
+            a[i].maskLayerIndices != b[i].maskLayerIndices ||
+            a[i].physicsEnabled != b[i].physicsEnabled
         ) {
             return false;
         }
@@ -138,6 +141,8 @@ static bool AreParameterLayerStatesEqual(
         a.renderOrderOverrideAt1 == b.renderOrderOverrideAt1 &&
         a.maskLayerIndicesAt0 == b.maskLayerIndicesAt0 &&
         a.maskLayerIndicesAt1 == b.maskLayerIndicesAt1 &&
+        a.physicsEnabledAt0 == b.physicsEnabledAt0 &&
+        a.physicsEnabledAt1 == b.physicsEnabledAt1 &&
         AreParameterMeshCornersEqual(a.meshCorners, b.meshCorners) &&
         AreParameterLayerSetpointsEqual(a.setpoints, b.setpoints);
 }
@@ -163,6 +168,7 @@ static bool AreParameterListsEqual(
             a[i].affectsOpacity != b[i].affectsOpacity ||
             a[i].affectsTexture != b[i].affectsTexture ||
             a[i].affectsColor != b[i].affectsColor ||
+            a[i].affectsPhysics != b[i].affectsPhysics ||
             a[i].layers.size() != b[i].layers.size()
         ) {
             return false;
@@ -199,6 +205,7 @@ static bool AreLayerHistoryStatesEqual(
         a.lightnessShift == b.lightnessShift &&
         a.renderOrderOverride == b.renderOrderOverride &&
         a.maskLayerIndices == b.maskLayerIndices &&
+        a.physicsEnabled == b.physicsEnabled &&
         AreLayerMeshesEqual(a.mesh, b.mesh);
 }
 
@@ -419,6 +426,7 @@ static DeformParameterLayerSetpoint MakeSetpointFromStateForHistory(
         setpoint.lightnessShift = state.lightnessShiftAt0;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt0;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt0;
+        setpoint.physicsEnabled = state.physicsEnabledAt0;
     } else {
         setpoint.mesh = state.meshAt1;
         setpoint.textureIndex = state.textureIndexAt1;
@@ -428,6 +436,7 @@ static DeformParameterLayerSetpoint MakeSetpointFromStateForHistory(
         setpoint.lightnessShift = state.lightnessShiftAt1;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt1;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt1;
+        setpoint.physicsEnabled = state.physicsEnabledAt1;
     }
     return setpoint;
 }
@@ -486,6 +495,26 @@ static DeformParameterLayerSetpoint EvaluateLayerSetpointForHistory(
     }
 
     return result;
+}
+
+static DeformParameterLayerSetpoint EvaluateDiscreteLayerSetpointForHistory(
+    const DeformParameterLayerState& state,
+    float value
+) {
+    if (state.setpoints.empty()) {
+        return MakeSetpointFromStateForHistory(state, value <= 0.5f ? 0.0f : 1.0f);
+    }
+
+    const DeformParameterLayerSetpoint* held = &state.setpoints.front();
+    for (const DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+        if (setpoint.value <= value || NearlyEqualSetpointValueForHistory(setpoint.value, value)) {
+            held = &setpoint;
+        } else {
+            break;
+        }
+    }
+
+    return *held;
 }
 
 static std::vector<float> CollectParameterSetpointValuesForHistory(const DeformParameter& parameter) {
@@ -670,6 +699,7 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         const DeformParameterLayerState* maskingBaseState = nullptr;
         const DeformParameterLayerState* textureBaseState = nullptr;
         const DeformParameterLayerState* colorBaseState = nullptr;
+        const DeformParameterLayerState* physicsBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerStateForHistory(parameter, layerIndex);
             if (!state) {
@@ -694,9 +724,12 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             if (parameter.affectsColor && !colorBaseState) {
                 colorBaseState = state;
             }
+            if (parameter.affectsPhysics && !physicsBaseState) {
+                physicsBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState && !physicsBaseState) {
             continue;
         }
 
@@ -713,6 +746,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         std::vector<int> resultMaskLayerIndices = maskingBaseState
             ? maskingBaseState->maskLayerIndicesAt0
             : layer.maskLayerIndices;
+        bool resultPhysicsEnabled = physicsBaseState
+            ? EvaluateDiscreteLayerSetpointForHistory(*physicsBaseState, 0.0f).physicsEnabled
+            : layer.physicsEnabled;
         const std::vector<int> meshParameterIndices =
             CollectMeshParametersForLayerForHistory(editor, layerIndex);
         const bool usingMultilinearMesh =
@@ -768,6 +804,9 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
             } else if (parameter.affectsMasking) {
                 resultMaskLayerIndices = EvaluateLayerSetpointForHistory(*state, value).maskLayerIndices;
             }
+            if (parameter.affectsPhysics) {
+                resultPhysicsEnabled = EvaluateDiscreteLayerSetpointForHistory(*state, value).physicsEnabled;
+            }
         }
 
         layer.mesh = std::move(resultMesh);
@@ -780,6 +819,7 @@ static void ApplyParameterSnapshotsToLayers(EditorState& editor) {
         layer.lightnessShift = std::clamp(resultLightnessShift, -100.0f, 100.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
+        layer.physicsEnabled = resultPhysicsEnabled;
         UpdateLayerBoundsFromMesh(layer);
     }
 }

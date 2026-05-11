@@ -162,6 +162,7 @@ static DeformParameterLayerSetpoint MakeSetpointFromState(
         setpoint.lightnessShift = state.lightnessShiftAt0;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt0;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt0;
+        setpoint.physicsEnabled = state.physicsEnabledAt0;
     } else {
         setpoint.mesh = state.meshAt1;
         setpoint.textureIndex = state.textureIndexAt1;
@@ -171,6 +172,7 @@ static DeformParameterLayerSetpoint MakeSetpointFromState(
         setpoint.lightnessShift = state.lightnessShiftAt1;
         setpoint.renderOrderOverride = state.renderOrderOverrideAt1;
         setpoint.maskLayerIndices = state.maskLayerIndicesAt1;
+        setpoint.physicsEnabled = state.physicsEnabledAt1;
     }
     return setpoint;
 }
@@ -242,6 +244,7 @@ static DeformParameterLayerSetpoint MakeStateSetpointFromLayer(
     setpoint.lightnessShift = layer.lightnessShift;
     setpoint.renderOrderOverride = layer.renderOrderOverride;
     setpoint.maskLayerIndices = layer.maskLayerIndices;
+    setpoint.physicsEnabled = layer.physicsEnabled;
     return setpoint;
 }
 
@@ -519,6 +522,99 @@ static void DeleteParameterSetpointValue(
             state.meshCorners.end()
         );
     }
+}
+
+static const DeformParameterLayerSetpoint* FindLayerSetpointAtValue(
+    const DeformParameterLayerState& state,
+    float value
+);
+static void UpsertLayerSetpoint(
+    DeformParameterLayerState& state,
+    const DeformParameterLayerSetpoint& setpoint
+);
+static bool HasMeshCorner(
+    const DeformParameterLayerState& state,
+    const std::vector<int>& parameterIndices,
+    const std::vector<float>& cornerValues
+);
+
+static bool FindDuplicateSetpointTargetValue(
+    const DeformParameter& parameter,
+    float sourceValue,
+    float& targetValue
+) {
+    constexpr float duplicateOffset = 0.05f;
+    constexpr float minSpacing = 0.05f;
+    const std::vector<float> setpoints = CollectParameterSetpointValues(parameter);
+
+    auto canUseValue = [&](float candidate) {
+        if (candidate <= 0.001f || candidate >= 0.999f) {
+            return false;
+        }
+
+        for (const float setpoint : setpoints) {
+            if (std::abs(candidate - setpoint) < minSpacing - 0.0001f) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const float right = sourceValue + duplicateOffset;
+    if (canUseValue(right)) {
+        targetValue = right;
+        return true;
+    }
+
+    const float left = sourceValue - duplicateOffset;
+    if (canUseValue(left)) {
+        targetValue = left;
+        return true;
+    }
+
+    return false;
+}
+
+static bool DuplicateParameterSetpointValue(
+    DeformParameter& parameter,
+    int parameterIndex,
+    float sourceValue,
+    float targetValue
+) {
+    bool duplicatedAny = false;
+
+    for (DeformParameterLayerState& state : parameter.layers) {
+        const DeformParameterLayerSetpoint* sourceSetpoint = FindLayerSetpointAtValue(state, sourceValue);
+        if (!sourceSetpoint) {
+            continue;
+        }
+
+        DeformParameterLayerSetpoint duplicate = *sourceSetpoint;
+        duplicate.value = targetValue;
+        UpsertLayerSetpoint(state, duplicate);
+        duplicatedAny = true;
+
+        const std::vector<DeformParameterMeshCorner> existingCorners = state.meshCorners;
+        for (const DeformParameterMeshCorner& corner : existingCorners) {
+            DeformParameterMeshCorner duplicatedCorner = corner;
+            bool usesSourceValue = false;
+            for (std::size_t i = 0; i < duplicatedCorner.parameterIndices.size() && i < duplicatedCorner.parameterValues.size(); ++i) {
+                if (
+                    duplicatedCorner.parameterIndices[i] == parameterIndex &&
+                    NearlyEqualSetpointValue(duplicatedCorner.parameterValues[i], sourceValue)
+                ) {
+                    duplicatedCorner.parameterValues[i] = targetValue;
+                    usesSourceValue = true;
+                }
+            }
+
+            if (usesSourceValue && !HasMeshCorner(state, duplicatedCorner.parameterIndices, duplicatedCorner.parameterValues)) {
+                state.meshCorners.push_back(std::move(duplicatedCorner));
+            }
+        }
+    }
+
+    return duplicatedAny;
 }
 
 static DeformParameterLayerSetpoint EvaluateLayerSetpoint(
@@ -835,12 +931,34 @@ static DeformParameterLayerSetpoint EvaluateLayerSetpoint(
     if (tValue <= 0.001f) {
         result.renderOrderOverride = lower->renderOrderOverride;
         result.maskLayerIndices = lower->maskLayerIndices;
+        result.physicsEnabled = lower->physicsEnabled;
     } else if (tValue >= 0.999f) {
         result.renderOrderOverride = upper->renderOrderOverride;
         result.maskLayerIndices = upper->maskLayerIndices;
+        result.physicsEnabled = upper->physicsEnabled;
     }
 
     return result;
+}
+
+static DeformParameterLayerSetpoint EvaluateDiscreteLayerSetpoint(
+    const DeformParameterLayerState& state,
+    float value
+) {
+    if (state.setpoints.empty()) {
+        return MakeSetpointFromState(state, value <= 0.5f ? 0.0f : 1.0f);
+    }
+
+    const DeformParameterLayerSetpoint* held = &state.setpoints.front();
+    for (const DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+        if (setpoint.value <= value || NearlyEqualSetpointValue(setpoint.value, value)) {
+            held = &setpoint;
+        } else {
+            break;
+        }
+    }
+
+    return *held;
 }
 
 static void UpsertLayerSetpoint(
@@ -1419,6 +1537,92 @@ static void EnsureMultilinearMeshCornersForAllLayers(EditorState& editor) {
     }
 }
 
+struct PendingParameterCornerSeed {
+    int layerIndex = -1;
+    std::vector<int> oldParameterIndices;
+    std::vector<std::vector<float>> oldCornerValues;
+    std::vector<LayerMesh> oldCornerMeshes;
+};
+
+static PendingParameterCornerSeed CaptureExistingMeshCornerSeedForNewParameter(
+    const EditorState& editor,
+    int layerIndex
+) {
+    PendingParameterCornerSeed seed;
+    seed.layerIndex = layerIndex;
+    if (!IsValidLayerIndex(editor, layerIndex)) {
+        return seed;
+    }
+
+    seed.oldParameterIndices = CollectMeshParametersForLayer(editor, layerIndex);
+    if (seed.oldParameterIndices.empty()) {
+        return seed;
+    }
+
+    CollectMultilinearCornerValueCombinations(
+        editor,
+        seed.oldParameterIndices,
+        seed.oldCornerValues
+    );
+    if (seed.oldCornerValues.empty()) {
+        return seed;
+    }
+
+    seed.oldCornerMeshes.reserve(seed.oldCornerValues.size());
+    for (const std::vector<float>& cornerValues : seed.oldCornerValues) {
+        seed.oldCornerMeshes.push_back(BuildSeedMeshForMultilinearCornerValues(
+            editor,
+            layerIndex,
+            seed.oldParameterIndices,
+            cornerValues
+        ));
+    }
+
+    return seed;
+}
+
+static void SeedExistingMeshCornersAcrossNewParameter(
+    EditorState& editor,
+    int newParameterIndex,
+    const PendingParameterCornerSeed& seed
+) {
+    if (
+        newParameterIndex < 0 ||
+        newParameterIndex >= static_cast<int>(editor.parameters.size()) ||
+        seed.layerIndex < 0 ||
+        seed.oldCornerValues.size() != seed.oldCornerMeshes.size()
+    ) {
+        return;
+    }
+
+    std::vector<int> expandedParameterIndices = seed.oldParameterIndices;
+    expandedParameterIndices.push_back(newParameterIndex);
+    const std::vector<float> newParameterValues =
+        IsStateParameter(editor.parameters[newParameterIndex])
+            ? std::vector<float>{0.0f}
+            : std::vector<float>{0.0f, 1.0f};
+
+    for (std::size_t i = 0; i < seed.oldCornerValues.size(); ++i) {
+        for (const float newValue : newParameterValues) {
+            std::vector<float> expandedCornerValues = seed.oldCornerValues[i];
+            expandedCornerValues.push_back(newValue);
+
+            for (const int parameterIndex : expandedParameterIndices) {
+                DeformParameterLayerState* state =
+                    FindParameterLayerState(editor.parameters[parameterIndex], seed.layerIndex);
+                if (state) {
+                    StoreMeshCornerForState(
+                        *state,
+                        expandedParameterIndices,
+                        expandedCornerValues,
+                        seed.oldCornerMeshes[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
 static LayerMesh BuildAdditiveSeedMeshForMultilinearCornerValues(
     const EditorState& editor,
     int layerIndex,
@@ -1742,6 +1946,7 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         const DeformParameterLayerState* maskingBaseState = nullptr;
         const DeformParameterLayerState* textureBaseState = nullptr;
         const DeformParameterLayerState* colorBaseState = nullptr;
+        const DeformParameterLayerState* physicsBaseState = nullptr;
         for (const DeformParameter& parameter : editor.parameters) {
             const DeformParameterLayerState* state = FindParameterLayerState(parameter, layerIndex);
             if (!state) {
@@ -1766,9 +1971,12 @@ static void ApplyAllDeformParameters(EditorState& editor) {
             if (parameter.affectsColor && !colorBaseState) {
                 colorBaseState = state;
             }
+            if (parameter.affectsPhysics && !physicsBaseState) {
+                physicsBaseState = state;
+            }
         }
 
-        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState) {
+        if (!meshBaseState && !opacityBaseState && !renderOrderBaseState && !maskingBaseState && !textureBaseState && !colorBaseState && !physicsBaseState) {
             continue;
         }
 
@@ -1785,6 +1993,9 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         std::vector<int> resultMaskLayerIndices = maskingBaseState
             ? maskingBaseState->maskLayerIndicesAt0
             : layer.maskLayerIndices;
+        bool resultPhysicsEnabled = physicsBaseState
+            ? EvaluateDiscreteLayerSetpoint(*physicsBaseState, 0.0f).physicsEnabled
+            : layer.physicsEnabled;
         const std::vector<int> meshParameterIndices = CollectMeshParametersForLayer(editor, layerIndex);
         const bool usingMultilinearMesh =
             ApplyMultilinearMeshForLayer(editor, layerIndex, meshParameterIndices, resultMesh);
@@ -1832,8 +2043,13 @@ static void ApplyAllDeformParameters(EditorState& editor) {
                 const DeformParameterLayerSetpoint evaluated = EvaluateLayerSetpoint(*state, value);
                 resultMaskLayerIndices = evaluated.maskLayerIndices;
             }
+
+            if (parameter.affectsPhysics) {
+                resultPhysicsEnabled = EvaluateDiscreteLayerSetpoint(*state, value).physicsEnabled;
+            }
         }
 
+        const bool physicsEnabledChanged = layer.physicsEnabled != resultPhysicsEnabled;
         layer.mesh = std::move(resultMesh);
         if (resultTextureIndex != layer.textureIndex) {
             ApplyTextureToLayer(editor.document, layer, resultTextureIndex);
@@ -1844,6 +2060,19 @@ static void ApplyAllDeformParameters(EditorState& editor) {
         layer.lightnessShift = std::clamp(resultLightnessShift, -100.0f, 100.0f);
         layer.renderOrderOverride = std::move(resultRenderOrderOverride);
         layer.maskLayerIndices = std::move(resultMaskLayerIndices);
+        layer.physicsEnabled = resultPhysicsEnabled;
+        if (physicsEnabledChanged) {
+            editor.physicsLayers.erase(
+                std::remove_if(
+                    editor.physicsLayers.begin(),
+                    editor.physicsLayers.end(),
+                    [&](const EditorLayerPhysicsState& state) {
+                        return state.layerIndex == layerIndex;
+                    }
+                ),
+                editor.physicsLayers.end()
+            );
+        }
         UpdateLayerBoundsFromMesh(layer);
     }
 }
@@ -1933,6 +2162,10 @@ static void CaptureMeshModeGuideMeshes(EditorState& editor) {
 }
 
 static bool LayerHasPhysicsVertices(const EditorLayer& layer) {
+    if (!layer.physicsEnabled) {
+        return false;
+    }
+
     return std::any_of(
         layer.mesh.vertices.begin(),
         layer.mesh.vertices.end(),
@@ -1958,6 +2191,20 @@ static void RebuildPhysicsLayer(EditorState& editor, int layerIndex) {
     }
 
     const EditorLayer& layer = editor.document.layers[layerIndex];
+    if (!layer.physicsEnabled) {
+        editor.physicsLayers.erase(
+            std::remove_if(
+                editor.physicsLayers.begin(),
+                editor.physicsLayers.end(),
+                [&](const EditorLayerPhysicsState& state) {
+                    return state.layerIndex == layerIndex;
+                }
+            ),
+            editor.physicsLayers.end()
+        );
+        return;
+    }
+
     EditorLayerPhysicsState* state = FindLayerPhysicsState(editor, layerIndex);
     if (!state) {
         editor.physicsLayers.push_back(EditorLayerPhysicsState{});
@@ -2266,6 +2513,8 @@ static DeformParameterLayerState CreateParameterLayerStateForLayer(
     state.renderOrderOverrideAt1 = layer.renderOrderOverride;
     state.maskLayerIndicesAt0 = layer.maskLayerIndices;
     state.maskLayerIndicesAt1 = layer.maskLayerIndices;
+    state.physicsEnabledAt0 = layer.physicsEnabled;
+    state.physicsEnabledAt1 = layer.physicsEnabled;
     EnsureParameterLayerSetpoints(state);
     return state;
 }
@@ -2277,6 +2526,11 @@ static void AddDeformParameter(EditorState& editor, DeformParameterType type = D
 
     const std::vector<DeformParameter> parametersBefore = editor.parameters;
     const int selectedParameterBefore = editor.selectedParameter;
+    std::vector<PendingParameterCornerSeed> cornerSeeds;
+    cornerSeeds.reserve(editor.selectedLayers.size());
+    for (const int layerIndex : editor.selectedLayers) {
+        cornerSeeds.push_back(CaptureExistingMeshCornerSeedForNewParameter(editor, layerIndex));
+    }
 
     DeformParameter parameter;
     parameter.name = "Parameter " + std::to_string(editor.parameters.size() + 1u);
@@ -2288,6 +2542,7 @@ static void AddDeformParameter(EditorState& editor, DeformParameterType type = D
     parameter.affectsOpacity = false;
     parameter.affectsTexture = false;
     parameter.affectsColor = false;
+    parameter.affectsPhysics = false;
     if (type == DeformParameterType::State) {
         parameter.stateNames.push_back("Default");
         parameter.selectedState = 0;
@@ -2315,6 +2570,9 @@ static void AddDeformParameter(EditorState& editor, DeformParameterType type = D
 
     editor.parameters.push_back(std::move(parameter));
     editor.selectedParameter = static_cast<int>(editor.parameters.size() - 1u);
+    for (const PendingParameterCornerSeed& seed : cornerSeeds) {
+        SeedExistingMeshCornersAcrossNewParameter(editor, editor.selectedParameter, seed);
+    }
     for (const int layerIndex : editor.selectedLayers) {
         EnsureMultilinearMeshCornersForLayer(editor, layerIndex);
     }
@@ -2339,6 +2597,7 @@ static void AddStateToParameter(EditorState& editor, int parameterIndex, const s
 
     const std::vector<DeformParameter> before = editor.parameters;
     const int selectedBefore = editor.selectedParameter;
+    PendingParameterCornerSeed cornerSeed;
     DeformParameter& parameter = editor.parameters[parameterIndex];
     const int stateIndex = static_cast<int>(parameter.stateNames.size());
     parameter.stateNames.push_back(stateName.empty() ? "State " + std::to_string(stateIndex + 1) : stateName);
@@ -2532,6 +2791,7 @@ static void ToggleParameterLayerMembership(
 
     const std::vector<DeformParameter> before = editor.parameters;
     const int selectedBefore = editor.selectedParameter;
+    PendingParameterCornerSeed cornerSeed;
     DeformParameter& parameter = editor.parameters[parameterIndex];
 
     auto it = std::find_if(
@@ -2543,6 +2803,7 @@ static void ToggleParameterLayerMembership(
     );
 
     if (it == parameter.layers.end()) {
+        cornerSeed = CaptureExistingMeshCornerSeedForNewParameter(editor, layerIndex);
         DeformParameterLayerState state = CreateParameterLayerStateForLayer(
             editor.document.layers[layerIndex],
             layerIndex
@@ -2558,6 +2819,7 @@ static void ToggleParameterLayerMembership(
             }
         }
         parameter.layers.push_back(std::move(state));
+        SeedExistingMeshCornersAcrossNewParameter(editor, parameterIndex, cornerSeed);
         EnsureMultilinearMeshCornersForLayer(editor, layerIndex);
     } else {
         parameter.layers.erase(it);
@@ -2752,6 +3014,9 @@ static void UpdateActiveParameterEndpointForLayers(
             if (parameter.affectsMasking) {
                 seed.maskLayerIndices = editor.document.layers[state.layerIndex].maskLayerIndices;
             }
+            if (parameter.affectsPhysics) {
+                seed.physicsEnabled = editor.document.layers[state.layerIndex].physicsEnabled;
+            }
             UpsertLayerSetpoint(state, seed);
         }
 
@@ -2823,6 +3088,9 @@ static void UpdateActiveParameterEndpointForLayers(
         if (parameter.affectsMasking) {
             setpoint.maskLayerIndices = layer.maskLayerIndices;
         }
+        if (parameter.affectsPhysics) {
+            setpoint.physicsEnabled = layer.physicsEnabled;
+        }
         UpsertLayerSetpoint(*state, setpoint);
 
         if (updateZero) {
@@ -2846,6 +3114,9 @@ static void UpdateActiveParameterEndpointForLayers(
             if (parameter.affectsMasking) {
                 state->maskLayerIndicesAt0 = layer.maskLayerIndices;
             }
+            if (parameter.affectsPhysics) {
+                state->physicsEnabledAt0 = layer.physicsEnabled;
+            }
         } else if (updateOne) {
             if (parameter.affectsMesh && !storedMultilinearMeshCorner) {
                 state->meshAt1 = endpointMesh;
@@ -2866,6 +3137,9 @@ static void UpdateActiveParameterEndpointForLayers(
             }
             if (parameter.affectsMasking) {
                 state->maskLayerIndicesAt1 = layer.maskLayerIndices;
+            }
+            if (parameter.affectsPhysics) {
+                state->physicsEnabledAt1 = layer.physicsEnabled;
             }
         }
     }
@@ -3062,6 +3336,57 @@ static bool DeleteSelectedParameterSetpoint(EditorState& editor) {
     );
     ApplyAllDeformParameters(editor);
     editor.statusText = "Deleted parameter setpoint.";
+    return true;
+}
+
+static bool DuplicateSelectedParameterSetpoint(EditorState& editor) {
+    const int parameterIndex = editor.selectedParameterSetpointParameter;
+    if (
+        parameterIndex < 0 ||
+        parameterIndex >= static_cast<int>(editor.parameters.size())
+    ) {
+        return false;
+    }
+
+    DeformParameter& parameter = editor.parameters[parameterIndex];
+    if (
+        IsStateParameter(parameter) ||
+        !ParameterHasSetpointValue(parameter, editor.selectedParameterSetpointValue)
+    ) {
+        return false;
+    }
+
+    float targetValue = 0.0f;
+    if (!FindDuplicateSetpointTargetValue(parameter, editor.selectedParameterSetpointValue, targetValue)) {
+        editor.statusText = "No room to duplicate setpoint.";
+        return false;
+    }
+
+    const std::vector<DeformParameter> parametersBefore = editor.parameters;
+    const int selectedBefore = editor.selectedParameter;
+    if (!DuplicateParameterSetpointValue(
+        parameter,
+        parameterIndex,
+        editor.selectedParameterSetpointValue,
+        targetValue
+    )) {
+        return false;
+    }
+
+    editor.selectedParameter = parameterIndex;
+    editor.selectedParameterSetpointParameter = parameterIndex;
+    editor.selectedParameterSetpointValue = targetValue;
+    parameter.value = targetValue;
+    PushParameterOperation(
+        editor,
+        parametersBefore,
+        selectedBefore,
+        editor.parameters,
+        editor.selectedParameter,
+        "Duplicate parameter setpoint"
+    );
+    ApplyAllDeformParameters(editor);
+    editor.statusText = "Duplicated parameter setpoint.";
     return true;
 }
 
@@ -3302,6 +3627,21 @@ static void DrawDeformParametersPanel(EditorState& editor) {
             }
 
             ImGui::Separator();
+            const bool canDuplicateSetpoint =
+                editor.selectedParameterSetpointParameter == i &&
+                !IsStateParameter(parameter) &&
+                ParameterHasSetpointValue(parameter, editor.selectedParameterSetpointValue);
+            if (!canDuplicateSetpoint) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Duplicate Setpoint")) {
+                DuplicateSelectedParameterSetpoint(editor);
+            }
+            if (!canDuplicateSetpoint) {
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Separator();
             ImGui::Text("Type: %s", IsStateParameter(parameter) ? "State" : "Slider");
             ImGui::Separator();
             ImGui::TextUnformatted("Can Edit");
@@ -3393,6 +3733,26 @@ static void DrawDeformParametersPanel(EditorState& editor) {
                         setpoint.hueShift = layer.hueShift;
                         setpoint.saturationScale = layer.saturationScale;
                         setpoint.lightnessShift = layer.lightnessShift;
+                    }
+                }
+                PushParameterChannelOperation(editor, before, selectedBefore, "Change parameter channels");
+            }
+
+            bool affectsPhysics = parameter.affectsPhysics;
+            if (ImGui::Checkbox("Physics", &affectsPhysics)) {
+                const std::vector<DeformParameter> before = editor.parameters;
+                const int selectedBefore = editor.selectedParameter;
+                parameter.affectsPhysics = affectsPhysics;
+                for (DeformParameterLayerState& state : parameter.layers) {
+                    if (!IsValidLayerIndex(editor, state.layerIndex)) {
+                        continue;
+                    }
+
+                    const bool neutralPhysics = editor.document.layers[state.layerIndex].physicsEnabled;
+                    state.physicsEnabledAt0 = neutralPhysics;
+                    state.physicsEnabledAt1 = neutralPhysics;
+                    for (DeformParameterLayerSetpoint& setpoint : state.setpoints) {
+                        setpoint.physicsEnabled = neutralPhysics;
                     }
                 }
                 PushParameterChannelOperation(editor, before, selectedBefore, "Change parameter channels");

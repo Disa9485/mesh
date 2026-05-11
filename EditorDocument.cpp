@@ -1218,6 +1218,7 @@ static bool WriteBinaryLayerHistoryState(std::ostream& out, const LayerHistorySt
     return
         WriteBinaryString(out, state.renderOrderOverride) &&
         WriteBinaryValue(out, state.textureIndex) &&
+        WriteBinaryValue(out, static_cast<std::uint8_t>(state.physicsEnabled ? 1u : 0u)) &&
         WriteBinaryMesh(out, state.mesh);
 }
 
@@ -1252,7 +1253,8 @@ static bool ReadBinaryLayerHistoryState(
     bool hasLayerMetadata,
     bool hasRenderOrderOverrideMetadata,
     bool hasLayerTextureIndex,
-    bool hasLayerColor
+    bool hasLayerColor,
+    bool hasLayerPhysics
 ) {
     LayerHistoryState parsed;
     std::uint8_t visible = 1u;
@@ -1302,6 +1304,14 @@ static bool ReadBinaryLayerHistoryState(
         return false;
     }
 
+    if (hasLayerPhysics) {
+        std::uint8_t physicsEnabled = 1u;
+        if (!ReadBinaryValue(in, physicsEnabled)) {
+            return false;
+        }
+        parsed.physicsEnabled = physicsEnabled != 0u;
+    }
+
     if (!ReadBinaryMesh(in, parsed.mesh)) {
         return false;
     }
@@ -1317,7 +1327,8 @@ static bool ReadBinaryLayerListHistoryState(
     bool hasLayerMetadata,
     bool hasRenderOrderOverrideMetadata,
     bool hasLayerTextureIndex,
-    bool hasLayerColor
+    bool hasLayerColor,
+    bool hasLayerPhysics
 ) {
     std::uint32_t layerCount = 0;
     if (!ReadBinaryValue(in, layerCount) || layerCount > 100'000u) {
@@ -1336,7 +1347,8 @@ static bool ReadBinaryLayerListHistoryState(
                 hasLayerMetadata,
                 hasRenderOrderOverrideMetadata,
                 hasLayerTextureIndex,
-                hasLayerColor
+                hasLayerColor,
+                hasLayerPhysics
             )
         ) {
             return false;
@@ -1398,13 +1410,15 @@ static bool WriteBinaryParameterList(
         const std::uint8_t affectsOpacity = parameter.affectsOpacity ? 1u : 0u;
         const std::uint8_t affectsTexture = parameter.affectsTexture ? 1u : 0u;
         const std::uint8_t affectsColor = parameter.affectsColor ? 1u : 0u;
+        const std::uint8_t affectsPhysics = parameter.affectsPhysics ? 1u : 0u;
         if (
             !WriteBinaryValue(out, affectsMesh) ||
             !WriteBinaryValue(out, affectsRenderOrder) ||
             !WriteBinaryValue(out, affectsMasking) ||
             !WriteBinaryValue(out, affectsOpacity) ||
             !WriteBinaryValue(out, affectsTexture) ||
-            !WriteBinaryValue(out, affectsColor)
+            !WriteBinaryValue(out, affectsColor) ||
+            !WriteBinaryValue(out, affectsPhysics)
         ) {
             return false;
         }
@@ -1489,7 +1503,9 @@ static bool WriteBinaryParameterList(
                 !WriteBinaryValue(out, state.lightnessShiftAt0) ||
                 !WriteBinaryValue(out, state.lightnessShiftAt1) ||
                 !WriteBinaryString(out, state.renderOrderOverrideAt0) ||
-                !WriteBinaryString(out, state.renderOrderOverrideAt1)
+                !WriteBinaryString(out, state.renderOrderOverrideAt1) ||
+                !WriteBinaryValue(out, static_cast<std::uint8_t>(state.physicsEnabledAt0 ? 1u : 0u)) ||
+                !WriteBinaryValue(out, static_cast<std::uint8_t>(state.physicsEnabledAt1 ? 1u : 0u))
             ) {
                 return false;
             }
@@ -1541,7 +1557,8 @@ static bool WriteBinaryParameterList(
                     !WriteBinaryValue(out, setpoint.hueShift) ||
                     !WriteBinaryValue(out, setpoint.saturationScale) ||
                     !WriteBinaryValue(out, setpoint.lightnessShift) ||
-                    !WriteBinaryString(out, setpoint.renderOrderOverride)
+                    !WriteBinaryString(out, setpoint.renderOrderOverride) ||
+                    !WriteBinaryValue(out, static_cast<std::uint8_t>(setpoint.physicsEnabled ? 1u : 0u))
                 ) {
                     return false;
                 }
@@ -1573,7 +1590,8 @@ static bool ReadBinaryParameterList(
     bool hasParameterSetpoints,
     bool hasParameterTypes,
     bool hasParameterTextures,
-    bool hasParameterColor
+    bool hasParameterColor,
+    bool hasParameterPhysics
 ) {
     parameters.clear();
 
@@ -1647,6 +1665,7 @@ static bool ReadBinaryParameterList(
             std::uint8_t affectsOpacity = 1u;
             std::uint8_t affectsTexture = 0u;
             std::uint8_t affectsColor = 0u;
+            std::uint8_t affectsPhysics = 0u;
             if (
                 !ReadBinaryValue(in, affectsMesh) ||
                 !ReadBinaryValue(in, affectsRenderOrder) ||
@@ -1661,12 +1680,16 @@ static bool ReadBinaryParameterList(
             if (hasParameterColor && !ReadBinaryValue(in, affectsColor)) {
                 return false;
             }
+            if (hasParameterPhysics && !ReadBinaryValue(in, affectsPhysics)) {
+                return false;
+            }
             parameter.affectsMesh = affectsMesh != 0u;
             parameter.affectsRenderOrder = affectsRenderOrder != 0u;
             parameter.affectsMasking = affectsMasking != 0u;
             parameter.affectsOpacity = affectsOpacity != 0u;
             parameter.affectsTexture = affectsTexture != 0u;
             parameter.affectsColor = affectsColor != 0u;
+            parameter.affectsPhysics = affectsPhysics != 0u;
         }
 
         if (!ReadBinaryValue(in, layerCount)) {
@@ -1699,6 +1722,8 @@ static bool ReadBinaryParameterList(
             std::string renderOrderOverrideAt1;
             std::vector<int> maskLayerIndicesAt0;
             std::vector<int> maskLayerIndicesAt1;
+            bool physicsEnabledAt0 = true;
+            bool physicsEnabledAt1 = true;
 
             if (
                 !ReadBinaryValue(in, savedIndex) ||
@@ -1792,6 +1817,18 @@ static bool ReadBinaryParameterList(
                 ) {
                     return false;
                 }
+                if (hasParameterPhysics) {
+                    std::uint8_t physics0 = 1u;
+                    std::uint8_t physics1 = 1u;
+                    if (
+                        !ReadBinaryValue(in, physics0) ||
+                        !ReadBinaryValue(in, physics1)
+                    ) {
+                        return false;
+                    }
+                    physicsEnabledAt0 = physics0 != 0u;
+                    physicsEnabledAt1 = physics1 != 0u;
+                }
             }
 
             if (hasMaskSetpoints) {
@@ -1850,6 +1887,13 @@ static bool ReadBinaryParameterList(
                         !ReadBinaryString(in, setpoint.renderOrderOverride)
                     ) {
                         return false;
+                    }
+                    if (hasParameterPhysics) {
+                        std::uint8_t setpointPhysics = 1u;
+                        if (!ReadBinaryValue(in, setpointPhysics)) {
+                            return false;
+                        }
+                        setpoint.physicsEnabled = setpointPhysics != 0u;
                     }
                     if (hasParameterTextures && !setpointTextureName.empty()) {
                         setpoint.textureIndex = FindTextureIndexByName(editor.document, setpointTextureName);
@@ -1928,6 +1972,8 @@ static bool ReadBinaryParameterList(
                 state.maskLayerIndicesAt0 = layer.maskLayerIndices;
                 state.maskLayerIndicesAt1 = layer.maskLayerIndices;
             }
+            state.physicsEnabledAt0 = physicsEnabledAt0;
+            state.physicsEnabledAt1 = physicsEnabledAt1;
             if (state.setpoints.empty()) {
                 DeformParameterLayerSetpoint zero;
                 zero.value = 0.0f;
@@ -1939,6 +1985,7 @@ static bool ReadBinaryParameterList(
                 zero.lightnessShift = state.lightnessShiftAt0;
                 zero.renderOrderOverride = state.renderOrderOverrideAt0;
                 zero.maskLayerIndices = state.maskLayerIndicesAt0;
+                zero.physicsEnabled = state.physicsEnabledAt0;
                 state.setpoints.push_back(std::move(zero));
 
                 DeformParameterLayerSetpoint one;
@@ -1951,6 +1998,7 @@ static bool ReadBinaryParameterList(
                 one.lightnessShift = state.lightnessShiftAt1;
                 one.renderOrderOverride = state.renderOrderOverrideAt1;
                 one.maskLayerIndices = state.maskLayerIndicesAt1;
+                one.physicsEnabled = state.physicsEnabledAt1;
                 state.setpoints.push_back(std::move(one));
             }
             parameter.layers.push_back(std::move(state));
@@ -2032,7 +2080,9 @@ static bool ReadBinaryLayerOperation(
     bool hasParameterTypes,
     bool hasParameterTextures,
     bool hasParameterColor,
-    bool hasLayerColor
+    bool hasLayerColor,
+    bool hasParameterPhysics,
+    bool hasLayerPhysics
 ) {
     int savedIndex = -1;
     std::string savedName;
@@ -2059,8 +2109,8 @@ static bool ReadBinaryLayerOperation(
     parsed.description = std::move(description);
 
     if (
-        !ReadBinaryLayerHistoryState(in, parsed.before, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex, hasLayerColor) ||
-        !ReadBinaryLayerHistoryState(in, parsed.after, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex, hasLayerColor)
+        !ReadBinaryLayerHistoryState(in, parsed.before, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex, hasLayerColor, hasLayerPhysics) ||
+        !ReadBinaryLayerHistoryState(in, parsed.after, hasLayerMetadata, hasRenderOrderOverrideMetadata, hasLayerTextureIndex, hasLayerColor, hasLayerPhysics)
     ) {
         return false;
     }
@@ -2094,7 +2144,8 @@ static bool ReadBinaryLayerOperation(
                         hasLayerMetadata,
                         hasRenderOrderOverrideMetadata,
                         hasLayerTextureIndex,
-                        hasLayerColor
+                        hasLayerColor,
+                        hasLayerPhysics
                     ) ||
                     !ReadBinaryLayerListHistoryState(
                         in,
@@ -2102,7 +2153,8 @@ static bool ReadBinaryLayerOperation(
                         hasLayerMetadata,
                         hasRenderOrderOverrideMetadata,
                         hasLayerTextureIndex,
-                        hasLayerColor
+                        hasLayerColor,
+                        hasLayerPhysics
                     )
                 ) {
                     return false;
@@ -2111,8 +2163,8 @@ static bool ReadBinaryLayerOperation(
         }
         if (parsed.hasParameterSnapshot) {
             if (
-                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor) ||
-                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor)
+                !ReadBinaryParameterList(in, editor, parsed.parametersBefore, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor, hasParameterPhysics) ||
+                !ReadBinaryParameterList(in, editor, parsed.parametersAfter, hasRenderOrderOverrideMetadata, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor, hasParameterPhysics)
             ) {
                 return false;
             }
@@ -2171,7 +2223,9 @@ static bool ReadBinaryHistory(
     bool hasParameterTypes,
     bool hasParameterTextures,
     bool hasParameterColor,
-    bool hasLayerColor
+    bool hasLayerColor,
+    bool hasParameterPhysics,
+    bool hasLayerPhysics
 ) {
     editor.history = EditHistory{};
 
@@ -2203,7 +2257,9 @@ static bool ReadBinaryHistory(
             hasParameterTypes,
             hasParameterTextures,
             hasParameterColor,
-            hasLayerColor
+            hasLayerColor,
+            hasParameterPhysics,
+            hasLayerPhysics
         )) {
             return false;
         }
@@ -2237,7 +2293,9 @@ static bool ReadBinaryHistory(
             hasParameterTypes,
             hasParameterTextures,
             hasParameterColor,
-            hasLayerColor
+            hasLayerColor,
+            hasParameterPhysics,
+            hasLayerPhysics
         )) {
             return false;
         }
@@ -2582,11 +2640,12 @@ static bool ReadBinaryParameters(
     bool hasParameterSetpoints,
     bool hasParameterTypes,
     bool hasParameterTextures,
-    bool hasParameterColor
+    bool hasParameterColor,
+    bool hasParameterPhysics
 ) {
     editor.parameters.clear();
     editor.selectedParameter = -1;
-    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor)) {
+    if (!ReadBinaryParameterList(in, editor, editor.parameters, hasLayerVisualSetpoints, hasMaskSetpoints, hasParameterChannels, hasParameterMeshCorners, hasParameterSetpoints, hasParameterTypes, hasParameterTextures, hasParameterColor, hasParameterPhysics)) {
         return false;
     }
 
@@ -2710,7 +2769,8 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
     const bool isVersion16 = magicString == std::string("MESHEDBG", 8);
     const bool isVersion17 = magicString == std::string("MESHEDBH", 8);
     const bool isVersion18 = magicString == std::string("MESHEDBI", 8);
-    const bool isCurrentProjectVersion = isVersion15 || isVersion16 || isVersion17 || isVersion18;
+    const bool isVersion19 = magicString == std::string("MESHEDBJ", 8);
+    const bool isCurrentProjectVersion = isVersion15 || isVersion16 || isVersion17 || isVersion18 || isVersion19;
     if (!file || (!isVersion1 && !isVersion2 && !isVersion3 && !isVersion4 && !isVersion5 && !isVersion6 && !isVersion7 && !isVersion8 && !isVersion9 && !isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isCurrentProjectVersion)) {
         error = "Binary mesh file has an invalid header.";
         return false;
@@ -2736,7 +2796,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         return false;
     }
 
-    if ((isVersion16 || isVersion17 || isVersion18) && !ReadBinaryPhysicsSettings(file, editor.physicsSettings, isVersion17)) {
+    if ((isVersion16 || isVersion17 || isVersion18 || isVersion19) && !ReadBinaryPhysicsSettings(file, editor.physicsSettings, isVersion17)) {
         error = "Project file has invalid global physics settings.";
         return false;
     }
@@ -2766,6 +2826,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         int textureIndex = -1;
         std::string textureName;
         EditorLayerPhysicsSettings physicsSettings;
+        bool physicsEnabled = true;
     };
 
     std::vector<LoadedLayerRecord> loadedRecords;
@@ -2855,9 +2916,18 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         }
 
         EditorLayerPhysicsSettings physicsSettings;
-        if ((isVersion16 || isVersion17 || isVersion18) && !ReadBinaryLayerPhysicsSettings(file, physicsSettings)) {
+        if ((isVersion16 || isVersion17 || isVersion18 || isVersion19) && !ReadBinaryLayerPhysicsSettings(file, physicsSettings)) {
             error = "Project file has invalid layer physics settings.";
             return false;
+        }
+        bool physicsEnabled = true;
+        if (isVersion19) {
+            std::uint8_t savedPhysicsEnabled = 1u;
+            if (!ReadBinaryValue(file, savedPhysicsEnabled)) {
+                error = "Project file has invalid layer physics enabled state.";
+                return false;
+            }
+            physicsEnabled = savedPhysicsEnabled != 0u;
         }
 
         if (!isVersion10 && !isVersion11 && !isVersion12 && !isVersion13 && !isVersion14 && !isCurrentProjectVersion && targetIndex < 0) {
@@ -2878,6 +2948,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         record.textureIndex = textureIndex;
         record.textureName = std::move(textureName);
         record.physicsSettings = physicsSettings;
+        record.physicsEnabled = physicsEnabled;
         loadedRecords.push_back(std::move(record));
     }
 
@@ -2936,6 +3007,7 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         layer.renderOrderOverride = std::move(loadedRecords[i].renderOrderOverride);
         layer.maskLayerIndices = std::move(loadedRecords[i].masks);
         layer.physicsSettings = loadedRecords[i].physicsSettings;
+        layer.physicsEnabled = loadedRecords[i].physicsEnabled;
         if (isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion) {
             ApplyTextureToLayer(editor.document, layer, loadedRecords[i].textureIndex);
         }
@@ -2958,7 +3030,9 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
         isVersion13 || isVersion14 || isCurrentProjectVersion,
         isVersion14 || isCurrentProjectVersion,
-        isVersion14 || isCurrentProjectVersion
+        isVersion14 || isCurrentProjectVersion,
+        isVersion19,
+        isVersion19
     )) {
         error = "Binary mesh file has invalid history data.";
         return false;
@@ -2974,7 +3048,8 @@ static bool LoadBinaryMeshesForEditor(EditorState& editor, const std::filesystem
         isVersion9 || isVersion10 || isVersion11 || isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
         isVersion12 || isVersion13 || isVersion14 || isCurrentProjectVersion,
         isVersion13 || isVersion14 || isCurrentProjectVersion,
-        isVersion14 || isCurrentProjectVersion
+        isVersion14 || isCurrentProjectVersion,
+        isVersion19
     )) {
         error = "Binary mesh file has invalid parameter data.";
         return false;
@@ -3229,7 +3304,8 @@ bool LoadProjectForEditor(
         std::string(magic, sizeof(magic)) == std::string("MESHEDBF", 8) ||
         std::string(magic, sizeof(magic)) == std::string("MESHEDBG", 8) ||
         std::string(magic, sizeof(magic)) == std::string("MESHEDBH", 8) ||
-        std::string(magic, sizeof(magic)) == std::string("MESHEDBI", 8);
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBI", 8) ||
+        std::string(magic, sizeof(magic)) == std::string("MESHEDBJ", 8);
     std::string projectPsdPath;
     if (hasProjectPsdField) {
         std::uint32_t canvasWidth = 0;
@@ -3297,7 +3373,7 @@ bool SaveProjectForEditor(const EditorState& editor, const std::string& path, st
         return false;
     }
 
-    file.write("MESHEDBI", 8);
+    file.write("MESHEDBJ", 8);
 
     const std::uint32_t canvasWidth = static_cast<std::uint32_t>(std::max(0, editor.document.canvasWidth));
     const std::uint32_t canvasHeight = static_cast<std::uint32_t>(std::max(0, editor.document.canvasHeight));
@@ -3387,6 +3463,12 @@ bool SaveProjectForEditor(const EditorState& editor, const std::string& path, st
 
         if (!WriteBinaryLayerPhysicsSettings(file, layer.physicsSettings)) {
             error = "Could not write layer physics settings.";
+            return false;
+        }
+
+        const std::uint8_t layerPhysicsEnabled = layer.physicsEnabled ? 1u : 0u;
+        if (!WriteBinaryValue(file, layerPhysicsEnabled)) {
+            error = "Could not write layer physics enabled state.";
             return false;
         }
     }

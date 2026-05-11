@@ -167,6 +167,7 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
                 setpoint.opacity = endpointOpacity;
                 setpoint.renderOrderOverride = editor.document.layers[layerIndex].renderOrderOverride;
                 setpoint.maskLayerIndices = editor.document.layers[layerIndex].maskLayerIndices;
+                setpoint.physicsEnabled = editor.document.layers[layerIndex].physicsEnabled;
                 state.setpoints.push_back(std::move(setpoint));
                 targetSetpoint = &state.setpoints.back();
             }
@@ -188,6 +189,9 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
             }
             if (parameter.affectsTexture) {
                 targetSetpoint->textureIndex = layer.textureIndex;
+            }
+            if (parameter.affectsPhysics) {
+                targetSetpoint->physicsEnabled = layer.physicsEnabled;
             }
         }
         return;
@@ -223,6 +227,9 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
             if (parameter.affectsTexture) {
                 state.textureIndexAt0 = layer.textureIndex;
             }
+            if (parameter.affectsPhysics) {
+                state.physicsEnabledAt0 = layer.physicsEnabled;
+            }
         } else if (updateOne) {
             if (parameter.affectsOpacity) {
                 state.opacityAt1 = endpointOpacity;
@@ -240,6 +247,9 @@ static void UpdateActiveParameterLayerVisualEndpoint(EditorState& editor, int la
             }
             if (parameter.affectsTexture) {
                 state.textureIndexAt1 = layer.textureIndex;
+            }
+            if (parameter.affectsPhysics) {
+                state.physicsEnabledAt1 = layer.physicsEnabled;
             }
         }
     }
@@ -754,6 +764,38 @@ static void DrawLayerDataPopup(EditorState& editor, int layerIndex) {
             parametersBefore,
             editor.parameters,
             "Change layer opacity"
+        );
+    }
+
+    bool layerPhysicsEnabled = layer.physicsEnabled;
+    if (ImGui::Checkbox("Physics Enabled", &layerPhysicsEnabled)) {
+        if (snapParameterBeforeLayerEdit()) {
+            ImGui::EndPopup();
+            return;
+        }
+
+        const std::vector<DeformParameter> parametersBefore = editor.parameters;
+        const LayerHistoryState before = CaptureLayerHistoryState(layer);
+        layer.physicsEnabled = layerPhysicsEnabled;
+        editor.physicsLayers.erase(
+            std::remove_if(
+                editor.physicsLayers.begin(),
+                editor.physicsLayers.end(),
+                [&](const EditorLayerPhysicsState& state) {
+                    return state.layerIndex == layerIndex;
+                }
+            ),
+            editor.physicsLayers.end()
+        );
+        UpdateActiveParameterEndpointForLayers(editor, std::vector<int>{layerIndex});
+        PushLayerOperationWithParameters(
+            editor,
+            layerIndex,
+            before,
+            CaptureLayerHistoryState(layer),
+            parametersBefore,
+            editor.parameters,
+            "Change layer physics"
         );
     }
 
